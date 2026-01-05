@@ -29,6 +29,7 @@ function App() {
   const [blinkOn, setBlinkOn] = useState(false)
   const recordingStartRef = useRef<number | null>(null)
   const [transcript, setTranscript] = useState('')
+  const [summary, setSummary] = useState('')
   const [sessionDir, setSessionDir] = useState<string | null>(null)
 
   useEffect(() => {
@@ -68,8 +69,7 @@ function App() {
       setStatusDetail('summary ready')
       setSummarizationState('done')
       const text = data.text || ''
-      // append summary below transcript for now
-      setTranscript((prev) => prev + '\n\n--- Summary ---\n' + text)
+      setSummary(text)
     })
 
     ;(window as any).backend.onSummaryStatus((_ev: any, data: any) => {
@@ -109,6 +109,7 @@ function App() {
 
   const onStart = () => {
     setTranscript('')
+    setSummary('')
     setStatus('recording')
     setStatusDetail('recording audio')
     setRecordingState('running')
@@ -127,6 +128,13 @@ function App() {
     setRecordingState('done')
     setTranscriptionState('running')
     ;(window as any).backend.stop()
+  }
+
+  const copyToClipboard = (text: string) => {
+    if (!text) return
+    navigator.clipboard.writeText(text).catch((err) => {
+      console.error('copy to clipboard failed', err)
+    })
   }
 
   return (
@@ -204,6 +212,9 @@ function App() {
 
       <div>
         <h3>Transcript</h3>
+        <button onClick={() => copyToClipboard(transcript)} disabled={!transcript} style={{ marginBottom: 8 }}>
+          Copy transcript
+        </button>
         <div style={{ whiteSpace: 'pre-wrap', background: '#151515', color: '#f1f1f1', padding: 10, minHeight: 160, border: '1px solid #2b2b2b', borderRadius: 6 }}>{transcript || '(empty)'}</div>
         {sessionDir ? (
           <div style={{ marginTop: 8 }}>
@@ -217,6 +228,14 @@ function App() {
             </div>
           </div>
         ) : null}
+      </div>
+
+      <div style={{ marginTop: 16 }}>
+        <h3>Summary</h3>
+        <button onClick={() => copyToClipboard(summary)} disabled={!summary} style={{ marginBottom: 8 }}>
+          Copy summary
+        </button>
+        <div style={{ whiteSpace: 'pre-wrap', background: '#151515', color: '#f1f1f1', padding: 10, minHeight: 160, border: '1px solid #2b2b2b', borderRadius: 6 }}>{summary || '(empty)'}</div>
       </div>
     </div>
   )

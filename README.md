@@ -86,7 +86,7 @@ winget install PortAudio.PortAudio
 2) Install Miniconda or Anaconda, then open the Anaconda Prompt and:
 
 ```powershell
-conda create -n meeting-notes python=3.10 -y
+conda create -n meeting-notes python=3.11.14
 conda activate meeting-notes
 ```
 
