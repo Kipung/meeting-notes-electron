@@ -45,7 +45,8 @@ class TranscriberDaemon:
             device = "cuda" if torch.cuda.is_available() else "cpu"
             try:
                 self.send({"event": "progress", "msg": f"loading model {model_name} on {device}"})
-                self.model = whisper.load_model(model_name, device=device)
+                download_root = os.environ.get("WHISPER_ROOT")
+                self.model = whisper.load_model(model_name, device=device, download_root=download_root)
                 self.model_name = model_name
                 self.send({"event": "loaded", "model": model_name})
             except Exception as e:

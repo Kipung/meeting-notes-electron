@@ -5,7 +5,8 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "tsc && vite build && electron-builder",
+    "build": "node scripts/verify_offline_bundle.mjs && tsc && vite build && electron-builder --publish=never",
+    "prepare:offline": "node scripts/prepare_offline_bundle.mjs",
     "lint": "eslint . --ext ts,tsx --report-unused-disable-directives --max-warnings 0",
     "preview": "vite preview"
   },

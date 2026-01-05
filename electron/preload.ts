@@ -9,4 +9,5 @@ contextBridge.exposeInMainWorld('backend', {
   onTranscriptionStatus: (cb: (ev: any, data: any) => void) => ipcRenderer.on('transcription-status', cb),
   onSummary: (cb: (ev: any, data: any) => void) => ipcRenderer.on('summary-ready', cb),
   onSummaryStatus: (cb: (ev: any, data: any) => void) => ipcRenderer.on('summary-status', cb),
+  onBootstrapStatus: (cb: (ev: any, data: any) => void) => ipcRenderer.on('bootstrap-status', cb),
 })

@@ -25,6 +25,9 @@ function App() {
   const [recordingState, setRecordingState] = useState<StepState>('idle')
   const [transcriptionState, setTranscriptionState] = useState<StepState>('idle')
   const [summarizationState, setSummarizationState] = useState<StepState>('idle')
+  const [setupState, setSetupState] = useState<StepState>('idle')
+  const [setupMessage, setSetupMessage] = useState('')
+  const [setupPercent, setSetupPercent] = useState<number | null>(null)
   const [elapsedSeconds, setElapsedSeconds] = useState(0)
   const [blinkOn, setBlinkOn] = useState(false)
   const recordingStartRef = useRef<number | null>(null)
@@ -79,6 +82,13 @@ function App() {
       if (state === 'done') setStatus('summary-ready')
       if (state === 'error') setStatus('summary-error')
       setStatusDetail(data.message || '')
+    })
+
+    ;(window as any).backend.onBootstrapStatus((_ev: any, data: any) => {
+      const state = data.state === 'running' ? 'running' : data.state === 'done' ? 'done' : data.state === 'error' ? 'error' : 'idle'
+      setSetupState(state)
+      setSetupMessage(data.message || '')
+      setSetupPercent(typeof data.percent === 'number' ? data.percent : null)
     })
   }, [])
 
@@ -145,6 +155,12 @@ function App() {
         <div style={{ marginBottom: 8, fontWeight: 600 }}>Session status</div>
         {sessionDir ? <div style={{ marginBottom: 8, color: '#c7c7c7' }}>Session: {sessionDir}</div> : <div style={{ marginBottom: 8, color: '#9b9b9b' }}>Session: (not started)</div>}
         <div style={{ display: 'flex', alignItems: 'center', marginBottom: 6 }}>
+          <span style={{ width: 10, height: 10, borderRadius: 999, background: STEP_COLORS[setupState], display: 'inline-block', marginRight: 8 }} />
+          <span style={{ width: 120, fontWeight: 600 }}>Setup</span>
+          <span style={{ minWidth: 90 }}>{STEP_LABELS[setupState]}</span>
+          {setupState === 'running' && typeof setupPercent === 'number' ? <span style={{ marginLeft: 8, color: '#c7c7c7' }}>{setupPercent}%</span> : null}
+        </div>
+        <div style={{ display: 'flex', alignItems: 'center', marginBottom: 6 }}>
           <span style={{ width: 10, height: 10, borderRadius: 999, background: STEP_COLORS[recordingState], display: 'inline-block', marginRight: 8 }} />
           <span style={{ width: 120, fontWeight: 600 }}>Recording</span>
           <span style={{ minWidth: 90 }}>{STEP_LABELS[recordingState]}</span>
@@ -174,6 +190,7 @@ function App() {
           <span style={{ width: 120, fontWeight: 600 }}>Summarizing</span>
           <span>{STEP_LABELS[summarizationState]}</span>
         </div>
+        {setupMessage ? <div style={{ marginTop: 8, color: '#c7c7c7' }}>{setupMessage}</div> : null}
         {statusDetail ? <div style={{ marginTop: 8, color: '#c7c7c7' }}>{statusDetail}</div> : null}
       </div>
 
@@ -201,7 +218,7 @@ function App() {
       </div>
 
       <div style={{ marginBottom: 12 }}>
-        <button onClick={onStart} disabled={running}>
+        <button onClick={onStart} disabled={running || setupState !== 'done'}>
           Start
         </button>
         <button onClick={onStop} disabled={!running} style={{ marginLeft: 10 }}>

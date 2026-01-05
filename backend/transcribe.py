@@ -35,7 +35,8 @@ def main():
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"[transcribe] loading model {model_name} on {device}", flush=True)
     try:
-        model = whisper.load_model(model_name, device=device)
+        download_root = os.environ.get("WHISPER_ROOT")
+        model = whisper.load_model(model_name, device=device, download_root=download_root)
     except Exception as e:
         print(f"[transcribe] failed to load model: {e}", file=sys.stderr, flush=True)
         sys.exit(3)

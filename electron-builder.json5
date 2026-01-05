@@ -4,12 +4,39 @@
   "appId": "YourAppID",
   "asar": true,
   "productName": "YourAppName",
+  "publish": null,
   "directories": {
     "output": "release/${version}"
   },
   "files": [
     "dist",
     "dist-electron"
+  ],
+  "extraResources": [
+    {
+      "from": "backend",
+      "to": "backend"
+    },
+    {
+      "from": "python",
+      "to": "python"
+    },
+    {
+      "from": "models",
+      "to": "models"
+    },
+    {
+      "from": "whisper",
+      "to": "whisper"
+    },
+    {
+      "from": "ffmpeg",
+      "to": "ffmpeg"
+    },
+    {
+      "from": "lib",
+      "to": "lib"
+    }
   ],
   "mac": {
     "target": [

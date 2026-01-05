@@ -16,6 +16,13 @@ dist-ssr
 models/*
 !models/.gitkeep
 sessions/
+python/
+whisper/
+ffmpeg/
+lib/
+release/
+runtime_unpack/
+dist-electron/
 
 # Editor directories and files
 .vscode/*

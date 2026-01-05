@@ -10,5 +10,6 @@ interface Window {
     onTranscriptionStatus: (cb: (ev: any, data: any) => void) => void
     onSummary: (cb: (ev: any, data: any) => void) => void
     onSummaryStatus: (cb: (ev: any, data: any) => void) => void
+    onBootstrapStatus: (cb: (ev: any, data: any) => void) => void
   }
 }
