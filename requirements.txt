@@ -1,0 +1,5 @@
+PyAudio==0.2.14
+numpy==1.26.4
+torch==2.9.1
+openai-whisper==20250625
+llama-cpp-python==0.3.16
