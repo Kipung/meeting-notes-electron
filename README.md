@@ -61,7 +61,13 @@ pip install -U "huggingface_hub[cli]"
 hf download unsloth/Llama-3.2-3B-Instruct-GGUF Llama-3.2-3B-Instruct-Q4_K_M.gguf --local-dir models --local-dir-use-symlinks False
 ```
 
-7) Run the app:
+7) (Optional) Download a second model variant (same repo, different quant):
+
+```bash
+hf download unsloth/Llama-3.2-3B-Instruct-GGUF Llama-3.2-3B-Instruct-Q5_K_M.gguf --local-dir models --local-dir-use-symlinks False
+```
+
+8) Run the app:
 
 ```bash
 pnpm dev
@@ -110,7 +116,13 @@ pip install -U "huggingface_hub[cli]"
 hf download unsloth/Llama-3.2-3B-Instruct-GGUF Llama-3.2-3B-Instruct-Q4_K_M.gguf --local-dir models --local-dir-use-symlinks False
 ```
 
-7) Run the app:
+7) (Optional) Download a second model variant (same repo, different quant):
+
+```powershell
+hf download unsloth/Llama-3.2-3B-Instruct-GGUF Llama-3.2-3B-Instruct-Q5_K_M.gguf --local-dir models --local-dir-use-symlinks False
+```
+
+8) Run the app:
 
 ```powershell
 pnpm dev
