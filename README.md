@@ -25,6 +25,34 @@ Record meetings, transcribe with Whisper, and summarize with a local GGUF/GGML L
 
 ## Setup
 
+### FFmpeg install (after cloning)
+
+You need `ffmpeg` on PATH for development. Pick one:
+
+macOS:
+
+```bash
+brew install ffmpeg
+```
+
+Windows (PowerShell):
+
+```powershell
+winget install Gyan.FFmpeg
+```
+
+Conda (any OS):
+
+```bash
+conda install -c conda-forge ffmpeg -y
+```
+
+Verify:
+
+```bash
+ffmpeg -version
+```
+
 ### macOS end-to-end (clean machine)
 
 1) Install system prerequisites:

@@ -15,11 +15,15 @@ dist-ssr
 # Local artifacts
 models/*
 !models/.gitkeep
+python/*
+!python/.gitkeep
+whisper/*
+!whisper/.gitkeep
+ffmpeg/*
+!ffmpeg/.gitkeep
+lib/*
+!lib/.gitkeep
 sessions/
-python/
-whisper/
-ffmpeg/
-lib/
 release/
 runtime_unpack/
 dist-electron/
