@@ -14,6 +14,18 @@ def main():
     p = pyaudio.PyAudio()
     devices = []
     try:
+        if sys.platform == "win32":
+            try:
+                import sounddevice  # noqa: F401
+            except Exception:
+                pass
+            else:
+                devices.append({
+                    'index': -1,
+                    'name': 'System + Default Mic (WASAPI)',
+                    'maxInputChannels': 1,
+                    'maxOutputChannels': 0,
+                })
         for i in range(p.get_device_count()):
             try:
                 info = p.get_device_info_by_index(i)

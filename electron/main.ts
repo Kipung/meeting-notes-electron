@@ -905,7 +905,11 @@ ipcMain.on('backend-start', (_evt, opts: { deviceIndex?: number; model?: string 
 
     const args: string[] = [scriptPath, '--out', outWav]
     if (opts && typeof opts.deviceIndex === 'number') {
-      args.push('--device-index', String(opts.deviceIndex))
+      if (opts.deviceIndex === -1) {
+        args.push('--mix-system')
+      } else {
+        args.push('--device-index', String(opts.deviceIndex))
+      }
     }
     const chunkSecs = getRecordChunkSecs()
     if (chunkSecs > 0) {
