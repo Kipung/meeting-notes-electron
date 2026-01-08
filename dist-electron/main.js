@@ -29,6 +29,9 @@ let recordingFailed = false;
 let chunkSummarizationEnabled = false;
 let finalSummaryStarted = false;
 let transcriptFinalized = false;
+let backgroundSummaryActive = false;
+let seenChunkCount = 0;
+let chunkSummaryBuffer = [];
 let setupState = "idle";
 let setupPromise = null;
 let downloadedSummaryModelPath = null;
@@ -133,6 +136,26 @@ function getChunkSummaryPath(chunkTranscriptPath) {
   const base = path.basename(chunkTranscriptPath, path.extname(chunkTranscriptPath));
   return path.join(dir, `${base}.summary.txt`);
 }
+function getChunkSummaryRangePath(chunkTranscriptPaths) {
+  const first = chunkTranscriptPaths[0];
+  const last = chunkTranscriptPaths[chunkTranscriptPaths.length - 1];
+  const dir = path.dirname(first);
+  const firstBase = path.basename(first, path.extname(first));
+  const lastBase = path.basename(last, path.extname(last));
+  return path.join(dir, `${firstBase}-${lastBase}.summary.txt`);
+}
+function parseChunkIndex(chunkTranscriptPath) {
+  const base = path.basename(chunkTranscriptPath);
+  const match = base.match(/chunk-(\d+)\.txt$/);
+  if (!match) return null;
+  const parsed = Number(match[1]);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+function getChunkSummaryGroupSize() {
+  if (seenChunkCount >= 16) return 4;
+  if (seenChunkCount >= 8) return 2;
+  return 1;
+}
 function sendBootstrapStatus(state, message, percent) {
   try {
     win == null ? void 0 : win.webContents.send("bootstrap-status", { state, message, percent });
@@ -181,7 +204,6 @@ function handleRecorderErrorLine(message) {
     return;
   }
   if (trimmed.includes("SoundcardRuntimeWarning")) {
-    console.warn("[record warning]", trimmed);
     return;
   }
   recordingFailed = true;
@@ -504,6 +526,14 @@ function startSummarizerIfNeeded(modelPath) {
           const summaryText = obj.text || "";
           if (summaryOut && isChunkSummaryPath(summaryOut)) {
             pendingChunkSummaries = Math.max(pendingChunkSummaries - 1, 0);
+            if (pendingChunkSummaries === 0 && backgroundSummaryActive && !recordingStopped) {
+              backgroundSummaryActive = false;
+              try {
+                win == null ? void 0 : win.webContents.send("summary-status", { state: "idle", sessionDir: currentSessionDir, message: "" });
+              } catch (e) {
+                console.error("failed to send summary-status idle", e);
+              }
+            }
             if (recordingStopped && pendingChunkTranscriptions === 0 && pendingChunkSummaries === 0 && currentSessionDir && !finalSummaryStarted) {
               finalizeTranscriptFromChunks(currentSessionDir);
               startFinalSummaryFromChunks(currentSessionDir);
@@ -627,13 +657,40 @@ function queueChunkSummary(chunkTranscriptPath, text) {
   if (!summarizerProcess || !chunkSummarizationEnabled) return;
   const trimmed = text.trim();
   if (!trimmed) return;
-  const outPath = getChunkSummaryPath(chunkTranscriptPath);
+  const index = parseChunkIndex(chunkTranscriptPath);
+  seenChunkCount += 1;
+  if (index !== null) {
+    chunkSummaryBuffer.push({ path: chunkTranscriptPath, text: trimmed, index });
+    chunkSummaryBuffer.sort((a, b) => a.index - b.index);
+  } else {
+    chunkSummaryBuffer.push({ path: chunkTranscriptPath, text: trimmed, index: Number.MAX_SAFE_INTEGER });
+  }
+  const groupSize = getChunkSummaryGroupSize();
+  if (chunkSummaryBuffer.length < groupSize && !recordingStopped) return;
+  flushChunkSummaryBuffer(groupSize);
+}
+function flushChunkSummaryBuffer(groupSizeOverride) {
+  if (!summarizerProcess || !chunkSummarizationEnabled) return;
+  const groupSize = groupSizeOverride || getChunkSummaryGroupSize();
+  if (chunkSummaryBuffer.length === 0) return;
+  const take = Math.min(groupSize, chunkSummaryBuffer.length);
+  const batch = chunkSummaryBuffer.splice(0, take);
+  const outPath = batch.length === 1 ? getChunkSummaryPath(batch[0].path) : getChunkSummaryRangePath(batch.map((b) => b.path));
   pendingChunkSummaries += 1;
+  if (!recordingStopped && pendingChunkSummaries === 1 && !backgroundSummaryActive) {
+    backgroundSummaryActive = true;
+    try {
+      win == null ? void 0 : win.webContents.send("summary-status", { state: "running", sessionDir: currentSessionDir, message: "summarizing chunks (background)" });
+    } catch (e) {
+      console.error("failed to send summary-status background", e);
+    }
+  }
   const chunkWords = getSummaryChunkWords();
+  const combined = batch.map((b) => b.text).join("\n\n");
   const ok = sendProcessCommand(
     summarizerProcess,
     "summarizer",
-    JSON.stringify({ cmd: "summarize", text: trimmed, out: outPath, chunk_words: chunkWords, quiet: true }) + "\n"
+    JSON.stringify({ cmd: "summarize", text: combined, out: outPath, chunk_words: chunkWords, quiet: true, fast: true }) + "\n"
   );
   if (!ok) {
     pendingChunkSummaries = Math.max(pendingChunkSummaries - 1, 0);
@@ -642,6 +699,7 @@ function queueChunkSummary(chunkTranscriptPath, text) {
 function startFinalSummaryFromChunks(sessionDir) {
   if (finalSummaryStarted) return;
   finalSummaryStarted = true;
+  backgroundSummaryActive = false;
   const chunksDir = path.join(sessionDir, "chunks");
   let combined = "";
   try {
@@ -760,6 +818,9 @@ function startTranscriberIfNeeded(modelName) {
               queueChunkSummary(outPath, text || "");
             }
             if (recordingStopped && pendingChunkTranscriptions === 0 && currentSessionDir) {
+              if (chunkSummaryBuffer.length > 0) {
+                flushChunkSummaryBuffer(chunkSummaryBuffer.length);
+              }
               finalizeTranscriptFromChunks(currentSessionDir);
               if (chunkSummarizationEnabled && pendingChunkSummaries === 0 && !finalSummaryStarted) {
                 startFinalSummaryFromChunks(currentSessionDir);
@@ -829,6 +890,9 @@ async function startBackend() {
   chunkSummarizationEnabled = false;
   finalSummaryStarted = false;
   transcriptFinalized = false;
+  backgroundSummaryActive = false;
+  seenChunkCount = 0;
+  chunkSummaryBuffer = [];
   const sessionDir = makeSessionDir();
   currentSessionDir = sessionDir;
   const outWav = path.join(sessionDir, "audio.wav");
@@ -984,6 +1048,9 @@ ipcMain.on("backend-start", (_evt, opts = {}) => {
     chunkSummarizationEnabled = false;
     finalSummaryStarted = false;
     transcriptFinalized = false;
+    backgroundSummaryActive = false;
+    seenChunkCount = 0;
+    chunkSummaryBuffer = [];
     const sessionDir = makeSessionDir();
     currentSessionDir = sessionDir;
     const outWav = path.join(sessionDir, "audio.wav");

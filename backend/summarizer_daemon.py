@@ -59,6 +59,12 @@ DEFAULT_PROMPT = (
     "If there are no action items, omit the Action Items section entirely.\n"
 )
 
+FAST_CHUNK_PROMPT = (
+    "You are an assistant that summarizes a short transcript snippet.\n"
+    "Write 2-3 concise sentences capturing the key points.\n"
+    "Do not include action items in chunk summaries.\n"
+)
+
 COMBINE_PROMPT = (
     "You are an assistant that synthesizes summaries of multiple meeting sections.\n"
     "Combine the following section summaries into a cohesive summary (6-10 sentences).\n"
@@ -259,7 +265,7 @@ class SummarizerDaemon:
             except Exception as e:
                 self.send({"event": "error", "msg": f"failed to load model: {e}"})
 
-    def summarize(self, text: str, out_path: Optional[str], chunk_words: int, quiet: bool):
+    def summarize(self, text: str, out_path: Optional[str], chunk_words: int, quiet: bool, fast: bool):
         with self.lock:
             if not self.client:
                 self.send({"event": "error", "msg": "model not loaded", "out": out_path})
@@ -285,13 +291,17 @@ class SummarizerDaemon:
                 progress_cb = None
                 if not quiet:
                     progress_cb = lambda msg, pct=None, eta=None: self.send({"event": "progress", "msg": msg, "percent": pct, "eta_secs": eta})
-                summary = hierarchical_summarize(
-                    self.client,
-                    text,
-                    tmp_max_words=chunk_words,
-                    n_ctx=self.n_ctx,
-                    on_progress=progress_cb,
-                )
+                if fast:
+                    max_tokens = max_tokens_from_env("SUM_CHUNK_FAST_TOKENS", 120, 48)
+                    summary = summarize_with_llm(self.client, text, FAST_CHUNK_PROMPT, max_tokens=max_tokens)
+                else:
+                    summary = hierarchical_summarize(
+                        self.client,
+                        text,
+                        tmp_max_words=chunk_words,
+                        n_ctx=self.n_ctx,
+                        on_progress=progress_cb,
+                    )
                 summary = strip_empty_action_items(summary)
             except Exception as e:
                 self.send({"event": "error", "msg": f"summarization error: {e}", "out": out_path})
@@ -338,7 +348,8 @@ def repl_loop(daemon: SummarizerDaemon):
                 continue
             chunk_words = int(obj.get("chunk_words", 800))
             quiet = bool(obj.get("quiet"))
-            daemon.summarize(text or "", obj.get("out"), chunk_words, quiet)
+            fast = bool(obj.get("fast"))
+            daemon.summarize(text or "", obj.get("out"), chunk_words, quiet, fast)
         elif cmd == "load_model":
             model_path = obj.get("model_path")
             if model_path:

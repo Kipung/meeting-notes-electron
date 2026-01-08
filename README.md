@@ -9,6 +9,8 @@ Record meetings, transcribe with Whisper, and summarize with a local GGUF/GGML L
 - Automatic summarization after transcription using a local LLM (GGUF/GGML) via llama-cpp
 - Multi-pass chunked summarization for long meetings
 - Background chunk transcription to reduce wait time after Stop
+- Optional system audio capture on Windows via soundcard loopback (falls back to mic-only)
+- Background chunk summarization with a final combine pass after Stop
 - Session artifacts saved under `app.getPath('userData')/sessions/<timestamp>/`
 
 ## Project layout
@@ -135,6 +137,12 @@ pnpm install
 
 ```powershell
 pip install -r requirements.txt
+```
+
+5) (Optional) Enable system audio capture (Windows loopback):
+
+```powershell
+pip install soundcard
 ```
 
 5) (Optional) Install HF CLI for model downloads:
@@ -295,21 +303,45 @@ If you need a larger context window (useful for long meetings), set:
 SUM_N_CTX=4096 pnpm dev
 ```
 
+To speed up summaries, tune chunking and token limits:
+
+```bash
+SUM_CHUNK_WORDS=400 SUM_MAX_TOKENS=192 SUM_COMBINE_MAX_TOKENS=256 pnpm dev
+```
+
+Notes:
+- `SUM_CHUNK_WORDS` controls transcript chunk size.
+- `SUM_MAX_TOKENS` controls per-chunk summary length.
+- `SUM_COMBINE_MAX_TOKENS` controls final combine summary length.
+
 To avoid hallucinated summaries on extremely short or empty recordings, the summarizer skips transcripts below a word threshold (default 20). Override with:
 
 ```bash
 SUM_MIN_WORDS=10 pnpm dev
 ```
 
+The summarizer only includes an **Action Items** section when it detects explicit actions (verbs or date-based commitments). Otherwise it omits the section.
+
 ## Faster end-of-session processing
 
-By default the recorder writes rolling audio chunks while you speak and transcribes those chunks during the recording. This reduces the wait after you press Stop.
-The final transcript appears after Stop, once the background chunks are assembled.
+By default the recorder writes rolling audio chunks while you speak and transcribes those chunks during the recording. It also summarizes those chunks in the background, then performs a final combine pass after Stop.
+The final transcript appears after Stop, once the background chunks are assembled, and the final summary is generated from the chunk summaries.
 
 Configure the chunk duration (in seconds), or set to 0 to disable:
 
 ```bash
 RECORD_CHUNK_SECS=60 pnpm dev
+```
+
+Chunk summaries are stored as `chunks/chunk-####.summary.txt` inside the session folder.
+
+## System audio capture (Windows)
+
+The app prefers WASAPI loopback via `sounddevice`, but some builds do not expose loopback on Windows. In that case it falls back to `soundcard` loopback.
+To enable system audio capture (Online meeting mode), install:
+
+```powershell
+pip install soundcard
 ```
 
 ## Outputs
