@@ -1,1 +1,14 @@
-"use strict";const r=require("electron");r.contextBridge.exposeInMainWorld("backend",{start:e=>r.ipcRenderer.send("backend-start",e||{}),stop:()=>r.ipcRenderer.send("backend-stop"),listDevices:()=>r.ipcRenderer.invoke("list-devices"),onSession:e=>r.ipcRenderer.on("session-started",e),onTranscript:e=>r.ipcRenderer.on("transcript-ready",e),onTranscriptionStatus:e=>r.ipcRenderer.on("transcription-status",e),onSummary:e=>r.ipcRenderer.on("summary-ready",e),onSummaryStatus:e=>r.ipcRenderer.on("summary-status",e),onBootstrapStatus:e=>r.ipcRenderer.on("bootstrap-status",e)});
+"use strict";
+const electron = require("electron");
+electron.contextBridge.exposeInMainWorld("backend", {
+  start: (opts) => electron.ipcRenderer.send("backend-start", opts || {}),
+  stop: () => electron.ipcRenderer.send("backend-stop"),
+  listDevices: () => electron.ipcRenderer.invoke("list-devices"),
+  onSession: (cb) => electron.ipcRenderer.on("session-started", cb),
+  onRecordingStatus: (cb) => electron.ipcRenderer.on("recording-status", cb),
+  onTranscript: (cb) => electron.ipcRenderer.on("transcript-ready", cb),
+  onTranscriptionStatus: (cb) => electron.ipcRenderer.on("transcription-status", cb),
+  onSummary: (cb) => electron.ipcRenderer.on("summary-ready", cb),
+  onSummaryStatus: (cb) => electron.ipcRenderer.on("summary-status", cb),
+  onBootstrapStatus: (cb) => electron.ipcRenderer.on("bootstrap-status", cb)
+});

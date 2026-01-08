@@ -39,12 +39,18 @@ let summarizerStdoutBuf = ''
 let currentSummaryModelPath: string | null = null
 let recordStdoutBuf = ''
 let pendingChunkTranscriptions = 0
+let pendingChunkSummaries = 0
 let recordingStopped = false
+let recordingFailed = false
+let chunkSummarizationEnabled = false
+let finalSummaryStarted = false
+let transcriptFinalized = false
 let setupState: 'idle' | 'running' | 'done' | 'error' = 'idle'
 let setupPromise: Promise<boolean> | null = null
 let downloadedSummaryModelPath: string | null = null
 
 const DEFAULT_RECORD_CHUNK_SECS = 60
+const DEFAULT_SUMMARY_CHUNK_WORDS = 400
 
 function getUserDataRoot(): string {
   return app.getPath('userData')
@@ -150,8 +156,26 @@ function getRecordChunkSecs(): number {
   return Math.floor(parsed)
 }
 
+function getSummaryChunkWords(): number {
+  const raw = process.env['SUM_CHUNK_WORDS']
+  if (!raw) return DEFAULT_SUMMARY_CHUNK_WORDS
+  const parsed = Number(raw)
+  if (!Number.isFinite(parsed) || parsed <= 50) return DEFAULT_SUMMARY_CHUNK_WORDS
+  return Math.floor(parsed)
+}
+
 function isChunkTranscriptPath(outPath: string): boolean {
   return outPath.includes(`${path.sep}chunks${path.sep}`) && outPath.endsWith('.txt')
+}
+
+function isChunkSummaryPath(outPath: string): boolean {
+  return outPath.includes(`${path.sep}chunks${path.sep}`) && outPath.endsWith('.summary.txt')
+}
+
+function getChunkSummaryPath(chunkTranscriptPath: string): string {
+  const dir = path.dirname(chunkTranscriptPath)
+  const base = path.basename(chunkTranscriptPath, path.extname(chunkTranscriptPath))
+  return path.join(dir, `${base}.summary.txt`)
 }
 
 function sendBootstrapStatus(state: 'running' | 'done' | 'error', message: string, percent?: number) {
@@ -173,6 +197,53 @@ function sendProcessCommand(proc: ReturnType<typeof spawn> | null, label: string
   } catch (e) {
     console.error(`[${label}] failed to write`, e)
     return false
+  }
+}
+
+function emitTranscriptReady(outPath: string, text: string) {
+  try {
+    win?.webContents.send('transcript-ready', { sessionDir: currentSessionDir, transcriptPath: outPath, text })
+  } catch (e) {
+    console.error('failed to send transcript-ready', e)
+  }
+  try {
+    win?.webContents.send('transcription-status', { state: 'done', sessionDir: currentSessionDir, message: 'transcription complete' })
+  } catch (e) {
+    console.error('failed to send transcription-status done', e)
+  }
+}
+
+function sendRecordingStatus(state: 'running' | 'done' | 'error', message: string) {
+  try {
+    win?.webContents.send('recording-status', { state, sessionDir: currentSessionDir, message })
+  } catch (e) {
+    console.error('failed to send recording-status', e)
+  }
+}
+
+function handleRecorderErrorLine(message: string) {
+  const trimmed = message.trim()
+  if (!trimmed) return
+  if (trimmed.includes('WASAPI loopback not supported')) {
+    console.warn('[record warning]', trimmed)
+    sendRecordingStatus('running', 'system audio loopback not supported; recording mic only')
+    return
+  }
+  if (trimmed.includes('SoundcardRuntimeWarning')) {
+    console.warn('[record warning]', trimmed)
+    return
+  }
+  recordingFailed = true
+  sendRecordingStatus('error', trimmed)
+  try {
+    win?.webContents.send('transcription-status', { state: 'error', sessionDir: currentSessionDir, message: trimmed })
+  } catch (e) {
+    console.error('failed to send transcription-status error', e)
+  }
+  try {
+    win?.webContents.send('summary-status', { state: 'error', sessionDir: currentSessionDir, message: 'recording failed' })
+  } catch (e) {
+    console.error('failed to send summary-status error', e)
   }
 }
 
@@ -456,6 +527,8 @@ async function ensureDependencies(): Promise<boolean> {
 }
 
 function finalizeTranscriptFromChunks(sessionDir: string) {
+  if (transcriptFinalized) return
+  transcriptFinalized = true
   const chunksDir = path.join(sessionDir, 'chunks')
   const outPath = path.join(sessionDir, 'transcript.txt')
   let combined = ''
@@ -476,7 +549,11 @@ function finalizeTranscriptFromChunks(sessionDir: string) {
   } catch (e) {
     console.error('failed to write combined transcript', e)
   }
-  handleTranscriptReady(outPath, combined)
+  if (chunkSummarizationEnabled) {
+    emitTranscriptReady(outPath, combined)
+  } else {
+    handleTranscriptReady(outPath, combined)
+  }
 }
 
 function startSummarizerIfNeeded(modelPath: string | null) {
@@ -514,6 +591,14 @@ function startSummarizerIfNeeded(modelPath: string | null) {
         if (obj.event === 'done') {
           const summaryOut = obj.out
           const summaryText = obj.text || ''
+          if (summaryOut && isChunkSummaryPath(summaryOut)) {
+            pendingChunkSummaries = Math.max(pendingChunkSummaries - 1, 0)
+            if (recordingStopped && pendingChunkTranscriptions === 0 && pendingChunkSummaries === 0 && currentSessionDir && !finalSummaryStarted) {
+              finalizeTranscriptFromChunks(currentSessionDir)
+              startFinalSummaryFromChunks(currentSessionDir)
+            }
+            continue
+          }
           try {
             win?.webContents.send('summary-ready', { sessionDir: currentSessionDir, summaryPath: summaryOut, text: summaryText })
           } catch (e) {
@@ -528,8 +613,13 @@ function startSummarizerIfNeeded(modelPath: string | null) {
           console.log('[summarizer] loaded', obj.model)
         } else if (obj.event === 'progress') {
           console.log('[summarizer]', obj.msg)
+          if (obj.msg && typeof obj.msg === 'string' && obj.msg.toLowerCase().includes('loading model')) {
+            continue
+          }
           try {
-            win?.webContents.send('summary-status', { state: 'running', sessionDir: currentSessionDir, message: obj.msg || 'summarizing' })
+            const percent = typeof obj.percent === 'number' ? obj.percent : undefined
+            const etaSecs = typeof obj.eta_secs === 'number' ? obj.eta_secs : undefined
+            win?.webContents.send('summary-status', { state: 'running', sessionDir: currentSessionDir, message: obj.msg || 'summarizing', percent, eta_secs: etaSecs })
           } catch (e) {
             console.error('failed to send summary-status running', e)
           }
@@ -547,7 +637,18 @@ function startSummarizerIfNeeded(modelPath: string | null) {
     }
   })
   else console.error('[summarizer] stdout not available')
-  if (summarizerProcess.stderr) summarizerProcess.stderr.on('data', (d) => console.error('[summarizer err]', d.toString().trim()))
+  if (summarizerProcess.stderr) summarizerProcess.stderr.on('data', (d) => {
+    const text = d.toString()
+    const lines = text.split('\n')
+    for (const line of lines) {
+      const trimmed = line.trim()
+      if (!trimmed) continue
+      if (trimmed.startsWith('llama_model_loader:') || trimmed.startsWith('llama_context:')) {
+        continue
+      }
+      console.error('[summarizer err]', trimmed)
+    }
+  })
   else console.error('[summarizer] stderr not available')
   summarizerProcess.on('error', (err) => {
     console.error('[summarizer spawn error]', err)
@@ -564,16 +665,7 @@ function startSummarizerIfNeeded(modelPath: string | null) {
 }
 
 function handleTranscriptReady(outPath: string, text: string) {
-  try {
-    win?.webContents.send('transcript-ready', { sessionDir: currentSessionDir, transcriptPath: outPath, text })
-  } catch (e) {
-    console.error('failed to send transcript-ready', e)
-  }
-  try {
-    win?.webContents.send('transcription-status', { state: 'done', sessionDir: currentSessionDir, message: 'transcription complete' })
-  } catch (e) {
-    console.error('failed to send transcription-status done', e)
-  }
+  emitTranscriptReady(outPath, text)
   try {
     const modelPath = resolveSummaryModelPath()
     if (!modelPath || !fs.existsSync(modelPath)) {
@@ -587,7 +679,8 @@ function handleTranscriptReady(outPath: string, text: string) {
       console.error('failed to send summary-status starting', e)
     }
     if (!summarizerProcess) throw new Error('summarizer not running')
-    if (!sendProcessCommand(summarizerProcess, 'summarizer', JSON.stringify({ cmd: 'summarize', file: outPath, out: summaryOut }) + '\n')) {
+    const chunkWords = getSummaryChunkWords()
+    if (!sendProcessCommand(summarizerProcess, 'summarizer', JSON.stringify({ cmd: 'summarize', file: outPath, out: summaryOut, chunk_words: chunkWords }) + '\n')) {
       throw new Error('summarizer stdin not available')
     }
   } catch (e) {
@@ -622,6 +715,75 @@ function queueChunkTranscription(chunkPath: string) {
   }
 }
 
+function queueChunkSummary(chunkTranscriptPath: string, text: string) {
+  if (!summarizerProcess || !chunkSummarizationEnabled) return
+  const trimmed = text.trim()
+  if (!trimmed) return
+  const outPath = getChunkSummaryPath(chunkTranscriptPath)
+  pendingChunkSummaries += 1
+  const chunkWords = getSummaryChunkWords()
+  const ok = sendProcessCommand(
+    summarizerProcess,
+    'summarizer',
+    JSON.stringify({ cmd: 'summarize', text: trimmed, out: outPath, chunk_words: chunkWords, quiet: true }) + '\n',
+  )
+  if (!ok) {
+    pendingChunkSummaries = Math.max(pendingChunkSummaries - 1, 0)
+  }
+}
+
+function startFinalSummaryFromChunks(sessionDir: string) {
+  if (finalSummaryStarted) return
+  finalSummaryStarted = true
+  const chunksDir = path.join(sessionDir, 'chunks')
+  let combined = ''
+  try {
+    const files = fs
+      .readdirSync(chunksDir)
+      .filter((f) => f.endsWith('.summary.txt'))
+      .sort()
+    for (const file of files) {
+      const part = fs.readFileSync(path.join(chunksDir, file), 'utf-8').trim()
+      if (part) combined += (combined ? '\n\n' : '') + part
+    }
+  } catch (e) {
+    console.error('failed to assemble chunk summaries', e)
+  }
+  if (!combined) {
+    try {
+      win?.webContents.send('summary-status', { state: 'error', sessionDir, message: 'no chunk summaries available' })
+    } catch (e) {
+      console.error('failed to send summary-status error', e)
+    }
+    return
+  }
+  try {
+    const modelPath = resolveSummaryModelPath()
+    if (!modelPath || !fs.existsSync(modelPath)) {
+      throw new Error('summary model not found')
+    }
+    startSummarizerIfNeeded(modelPath)
+    const summaryOut = path.join(sessionDir, 'summary.txt')
+    try {
+      win?.webContents.send('summary-status', { state: 'starting', sessionDir, message: 'starting summarization' })
+    } catch (e) {
+      console.error('failed to send summary-status starting', e)
+    }
+    const chunkWords = getSummaryChunkWords()
+    if (!summarizerProcess) throw new Error('summarizer not running')
+    if (!sendProcessCommand(summarizerProcess, 'summarizer', JSON.stringify({ cmd: 'summarize', text: combined, out: summaryOut, chunk_words: chunkWords }) + '\n')) {
+      throw new Error('summarizer stdin not available')
+    }
+  } catch (e) {
+    console.error('failed to start summarizer from chunks', e)
+    try {
+      win?.webContents.send('summary-status', { state: 'error', sessionDir, message: 'failed to start summarizer' })
+    } catch (e2) {
+      console.error('failed to send summary-status error', e2)
+    }
+  }
+}
+
 function handleRecordOutput(data: Buffer) {
   recordStdoutBuf += data.toString()
   const parts = recordStdoutBuf.split('\n')
@@ -631,6 +793,11 @@ function handleRecordOutput(data: Buffer) {
     if (!line) continue
     try {
       const obj = JSON.parse(line)
+      if (obj.event === 'warning' && obj.msg) {
+        console.warn('[record warning]', obj.msg)
+        sendRecordingStatus('running', obj.msg)
+        continue
+      }
       if (obj.event === 'chunk' && obj.path) {
         queueChunkTranscription(obj.path)
         continue
@@ -639,6 +806,29 @@ function handleRecordOutput(data: Buffer) {
       // not json
     }
     console.log('[backend]', line)
+  }
+}
+
+function isWavUsable(wavPath: string): boolean {
+  try {
+    const stat = fs.statSync(wavPath)
+    return stat.isFile() && stat.size > 44
+  } catch {
+    return false
+  }
+}
+
+function reportRecordingError(message: string) {
+  sendRecordingStatus('error', message)
+  try {
+    win?.webContents.send('transcription-status', { state: 'error', sessionDir: currentSessionDir, message })
+  } catch (e) {
+    console.error('failed to send transcription-status error', e)
+  }
+  try {
+    win?.webContents.send('summary-status', { state: 'error', sessionDir: currentSessionDir, message: 'recording failed' })
+  } catch (e) {
+    console.error('failed to send summary-status error', e)
   }
 }
 
@@ -671,8 +861,14 @@ function startTranscriberIfNeeded(modelName: string) {
           const text = obj.text || ''
           if (outPath && isChunkTranscriptPath(outPath)) {
             pendingChunkTranscriptions = Math.max(pendingChunkTranscriptions - 1, 0)
+            if (chunkSummarizationEnabled) {
+              queueChunkSummary(outPath, text || '')
+            }
             if (recordingStopped && pendingChunkTranscriptions === 0 && currentSessionDir) {
               finalizeTranscriptFromChunks(currentSessionDir)
+              if (chunkSummarizationEnabled && pendingChunkSummaries === 0 && !finalSummaryStarted) {
+                startFinalSummaryFromChunks(currentSessionDir)
+              }
             }
             continue
           }
@@ -744,7 +940,12 @@ async function startBackend() {
 
   recordStdoutBuf = ''
   pendingChunkTranscriptions = 0
+  pendingChunkSummaries = 0
   recordingStopped = false
+  recordingFailed = false
+  chunkSummarizationEnabled = false
+  finalSummaryStarted = false
+  transcriptFinalized = false
 
   const sessionDir = makeSessionDir()
   currentSessionDir = sessionDir
@@ -761,6 +962,7 @@ async function startBackend() {
 
   const args: string[] = [scriptPath, '--out', outWav]
   const chunkSecs = getRecordChunkSecs()
+  chunkSummarizationEnabled = chunkSecs > 0
   if (chunkSecs > 0) {
     args.push('--chunk-secs', String(chunkSecs))
   }
@@ -779,7 +981,18 @@ async function startBackend() {
   else console.error('[backend] stdout not available')
 
   if (backendProcess.stderr) backendProcess.stderr.on('data', (data) => {
-    console.error('[backend err]', data.toString().trim())
+    const text = data.toString()
+    const lines = text.split('\n')
+    for (const line of lines) {
+      const trimmed = line.trim()
+      if (!trimmed) continue
+      if (trimmed.includes('SoundcardRuntimeWarning')) {
+        handleRecorderErrorLine(trimmed)
+        continue
+      }
+      console.error('[backend err]', trimmed)
+      handleRecorderErrorLine(trimmed)
+    }
   })
   else console.error('[backend] stderr not available')
 
@@ -793,6 +1006,10 @@ async function startBackend() {
   })
   backendProcess.on('exit', (code) => {
     console.log('[backend] exited with code', code)
+    if (code !== 0 && !recordingStopped) {
+      recordingFailed = true
+      reportRecordingError('recording failed (recorder exited)')
+    }
     backendProcess = null
   })
 }
@@ -800,21 +1017,31 @@ async function startBackend() {
 function stopBackend() {
   if (!backendProcess) {
     console.log('[backend] not running')
-    return
+  } else {
+    backendProcess.kill('SIGTERM')
+    backendProcess = null
+    console.log('[backend] stop signal sent')
   }
-
-  backendProcess.kill('SIGTERM')
-  backendProcess = null
-  console.log('[backend] stop signal sent')
   // After stopping recording, kick off transcription for the session
   if (currentSessionDir) {
     const wavPath = path.join(currentSessionDir, 'audio.wav')
     const outPath = path.join(currentSessionDir, 'transcript.txt')
 
     recordingStopped = true
-    const chunkSecs = getRecordChunkSecs()
-    if (chunkSecs > 0 && transcriberProcess) {
+    if (recordingFailed || !isWavUsable(wavPath)) {
+      reportRecordingError('no audio captured')
       return
+    }
+    const chunkSecs = getRecordChunkSecs()
+    if (chunkSecs > 0) {
+      if (pendingChunkTranscriptions > 0) return
+      finalizeTranscriptFromChunks(currentSessionDir)
+      if (chunkSummarizationEnabled) {
+        if (pendingChunkSummaries === 0 && !finalSummaryStarted) {
+          startFinalSummaryFromChunks(currentSessionDir)
+        }
+        return
+      }
     }
 
     if (transcriberProcess) {
@@ -857,11 +1084,7 @@ function stopBackend() {
         } catch (e) {
           text = buf
         }
-        try {
-          win?.webContents.send('transcript-ready', { sessionDir: currentSessionDir, transcriptPath: outPath, text })
-        } catch (e) {
-          console.error('failed to send transcript-ready', e)
-        }
+        emitTranscriptReady(outPath, text)
         try {
           const state = code === 0 ? 'done' : 'error'
           win?.webContents.send('transcription-status', { state, sessionDir: currentSessionDir, message: code === 0 ? 'transcription complete' : 'transcription failed' })
@@ -889,7 +1112,12 @@ ipcMain.on('backend-start', (_evt, opts: { deviceIndex?: number; model?: string 
 
     recordStdoutBuf = ''
     pendingChunkTranscriptions = 0
+    pendingChunkSummaries = 0
     recordingStopped = false
+    recordingFailed = false
+    chunkSummarizationEnabled = false
+    finalSummaryStarted = false
+    transcriptFinalized = false
 
     const sessionDir = makeSessionDir()
     currentSessionDir = sessionDir
@@ -912,6 +1140,7 @@ ipcMain.on('backend-start', (_evt, opts: { deviceIndex?: number; model?: string 
       }
     }
     const chunkSecs = getRecordChunkSecs()
+    chunkSummarizationEnabled = chunkSecs > 0
     if (chunkSecs > 0) {
       args.push('--chunk-secs', String(chunkSecs))
     }
@@ -931,7 +1160,18 @@ ipcMain.on('backend-start', (_evt, opts: { deviceIndex?: number; model?: string 
     else console.error('[backend] stdout not available')
 
     if (backendProcess.stderr) backendProcess.stderr.on('data', (data) => {
-      console.error('[backend err]', data.toString().trim())
+      const text = data.toString()
+      const lines = text.split('\n')
+      for (const line of lines) {
+        const trimmed = line.trim()
+        if (!trimmed) continue
+        if (trimmed.includes('SoundcardRuntimeWarning')) {
+          handleRecorderErrorLine(trimmed)
+          continue
+        }
+        console.error('[backend err]', trimmed)
+        handleRecorderErrorLine(trimmed)
+      }
     })
     else console.error('[backend] stderr not available')
 
@@ -946,6 +1186,10 @@ ipcMain.on('backend-start', (_evt, opts: { deviceIndex?: number; model?: string 
 
     backendProcess.on('exit', (code) => {
       console.log('[backend] exited with code', code)
+      if (code !== 0 && !recordingStopped) {
+        recordingFailed = true
+        reportRecordingError('recording failed (recorder exited)')
+      }
       backendProcess = null
     })
   })()

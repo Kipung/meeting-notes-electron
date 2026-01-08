@@ -1,707 +1,1129 @@
-import { ipcMain as H, app as b, BrowserWindow as J } from "electron";
-import { spawn as v } from "node:child_process";
-import { fileURLToPath as ce } from "node:url";
-import u from "node:fs";
-import i from "node:path";
-import le from "node:http";
-import de from "node:https";
-const V = i.dirname(ce(import.meta.url));
-process.env.APP_ROOT = i.join(V, "..");
-const U = process.env.VITE_DEV_SERVER_URL, Ne = i.join(process.env.APP_ROOT, "dist-electron"), Y = i.join(process.env.APP_ROOT, "dist");
-process.env.VITE_PUBLIC = U ? i.join(process.env.APP_ROOT, "public") : Y;
-const ue = "https://huggingface.co/unsloth/Llama-3.2-3B-Instruct-GGUF/resolve/main/Llama-3.2-3B-Instruct-Q4_K_M.gguf";
-let n, p = null, m = null, x = "small.en", g = null, F = "", h = null, A = "", L = null, T = "", S = 0, B = !1, N = "idle", R = null, O = null;
-const me = 60;
-function C() {
-  return b.getPath("userData");
+import { ipcMain, app, BrowserWindow } from "electron";
+import { spawn } from "node:child_process";
+import { fileURLToPath } from "node:url";
+import fs from "node:fs";
+import path from "node:path";
+import http from "node:http";
+import https from "node:https";
+const __dirname$1 = path.dirname(fileURLToPath(import.meta.url));
+process.env.APP_ROOT = path.join(__dirname$1, "..");
+const VITE_DEV_SERVER_URL = process.env["VITE_DEV_SERVER_URL"];
+const MAIN_DIST = path.join(process.env.APP_ROOT, "dist-electron");
+const RENDERER_DIST = path.join(process.env.APP_ROOT, "dist");
+process.env.VITE_PUBLIC = VITE_DEV_SERVER_URL ? path.join(process.env.APP_ROOT, "public") : RENDERER_DIST;
+const DEFAULT_SUMMARY_MODEL_URL = "https://huggingface.co/unsloth/Llama-3.2-3B-Instruct-GGUF/resolve/main/Llama-3.2-3B-Instruct-Q4_K_M.gguf";
+let win;
+let backendProcess = null;
+let currentSessionDir = null;
+let currentModelName = "small.en";
+let transcriberProcess = null;
+let transcriberStdoutBuf = "";
+let summarizerProcess = null;
+let summarizerStdoutBuf = "";
+let currentSummaryModelPath = null;
+let recordStdoutBuf = "";
+let pendingChunkTranscriptions = 0;
+let pendingChunkSummaries = 0;
+let recordingStopped = false;
+let recordingFailed = false;
+let chunkSummarizationEnabled = false;
+let finalSummaryStarted = false;
+let transcriptFinalized = false;
+let setupState = "idle";
+let setupPromise = null;
+let downloadedSummaryModelPath = null;
+const DEFAULT_RECORD_CHUNK_SECS = 60;
+const DEFAULT_SUMMARY_CHUNK_WORDS = 400;
+function getUserDataRoot() {
+  return app.getPath("userData");
 }
-function fe() {
-  return i.join(C(), "sessions");
+function getSessionsRoot() {
+  return path.join(getUserDataRoot(), "sessions");
 }
-function K() {
-  return i.join(C(), "models");
+function getModelsRoot() {
+  return path.join(getUserDataRoot(), "models");
 }
-function pe() {
-  return i.join(process.resourcesPath, "models");
+function getPackagedModelsRoot() {
+  return path.join(process.resourcesPath, "models");
 }
-function q() {
-  return i.join(C(), "whisper");
+function getWhisperRoot() {
+  return path.join(getUserDataRoot(), "whisper");
 }
-function ge() {
-  return i.join(process.resourcesPath, "whisper");
+function getPackagedWhisperRoot() {
+  return path.join(process.resourcesPath, "whisper");
 }
-function ye() {
-  return i.join(process.resourcesPath, "ffmpeg");
+function getPackagedFfmpegDir() {
+  return path.join(process.resourcesPath, "ffmpeg");
 }
-function he() {
-  return i.join(process.resourcesPath, "lib");
+function getPackagedLibDir() {
+  return path.join(process.resourcesPath, "lib");
 }
-function be(e) {
-  return process.platform === "win32" ? i.join(e, "ffmpeg.exe") : i.join(e, "ffmpeg");
+function getFfmpegPathFromDir(dir) {
+  return process.platform === "win32" ? path.join(dir, "ffmpeg.exe") : path.join(dir, "ffmpeg");
 }
-function Q() {
-  const e = process.env.FFMPEG_PATH;
-  if (e && e.trim() && u.existsSync(e)) return e;
-  const r = be(ye());
-  return u.existsSync(r) ? r : null;
+function resolveFfmpegPath() {
+  const override = process.env["FFMPEG_PATH"];
+  if (override && override.trim() && fs.existsSync(override)) return override;
+  const packaged = getFfmpegPathFromDir(getPackagedFfmpegDir());
+  if (fs.existsSync(packaged)) return packaged;
+  return null;
 }
-function E() {
-  const e = process.env.BACKEND_ROOT;
-  if (e && e.trim()) return e;
-  const r = i.join(C(), "backend");
-  if (u.existsSync(r)) return r;
-  const t = i.join(process.resourcesPath, "backend");
-  return u.existsSync(t) ? t : i.join(process.env.APP_ROOT, "backend");
+function getBackendRoot() {
+  const override = process.env["BACKEND_ROOT"];
+  if (override && override.trim()) return override;
+  const userBackend = path.join(getUserDataRoot(), "backend");
+  if (fs.existsSync(userBackend)) return userBackend;
+  const packagedBackend = path.join(process.resourcesPath, "backend");
+  if (fs.existsSync(packagedBackend)) return packagedBackend;
+  return path.join(process.env.APP_ROOT, "backend");
 }
-function X() {
-  return process.platform === "win32" ? i.join(process.resourcesPath, "python", "python.exe") : i.join(process.resourcesPath, "python", "bin", "python3");
+function getBundledPythonPath() {
+  return process.platform === "win32" ? path.join(process.resourcesPath, "python", "python.exe") : path.join(process.resourcesPath, "python", "bin", "python3");
 }
-function Z() {
-  return process.platform === "win32" ? i.join(C(), "python", "python.exe") : i.join(C(), "python", "bin", "python3");
+function getUserPythonPath() {
+  return process.platform === "win32" ? path.join(getUserDataRoot(), "python", "python.exe") : path.join(getUserDataRoot(), "python", "bin", "python3");
 }
-function P() {
-  const e = process.env.MEETING_NOTES_PYTHON;
-  if (e && e.trim()) return e;
-  const r = X();
-  if (u.existsSync(r)) return r;
-  const t = Z();
-  return u.existsSync(t) ? t : process.platform === "win32" ? "python" : "python3";
+function getPythonCommand() {
+  const override = process.env["MEETING_NOTES_PYTHON"];
+  if (override && override.trim()) return override;
+  const bundled = getBundledPythonPath();
+  if (fs.existsSync(bundled)) return bundled;
+  const userBundled = getUserPythonPath();
+  if (fs.existsSync(userBundled)) return userBundled;
+  return process.platform === "win32" ? "python" : "python3";
 }
-function _() {
-  const e = { ...process.env, WHISPER_ROOT: q() }, r = Q();
-  if (r) {
-    e.FFMPEG_PATH = e.FFMPEG_PATH || r;
-    const t = i.dirname(r);
-    e.PATH = [t, e.PATH || ""].filter(Boolean).join(i.delimiter);
+function getPythonEnv() {
+  const env = { ...process.env, WHISPER_ROOT: getWhisperRoot() };
+  const ffmpegPath = resolveFfmpegPath();
+  if (ffmpegPath) {
+    env.FFMPEG_PATH = env.FFMPEG_PATH || ffmpegPath;
+    const dir = path.dirname(ffmpegPath);
+    env.PATH = [dir, env.PATH || ""].filter(Boolean).join(path.delimiter);
   }
   if (process.platform === "darwin") {
-    const t = he();
-    u.existsSync(t) && (e.DYLD_LIBRARY_PATH = [t, e.DYLD_LIBRARY_PATH || ""].filter(Boolean).join(i.delimiter));
+    const libDir = getPackagedLibDir();
+    if (fs.existsSync(libDir)) {
+      env.DYLD_LIBRARY_PATH = [libDir, env.DYLD_LIBRARY_PATH || ""].filter(Boolean).join(path.delimiter);
+    }
   }
-  return e;
+  return env;
 }
-function $() {
-  const e = process.env.RECORD_CHUNK_SECS;
-  if (!e) return me;
-  const r = Number(e);
-  return !Number.isFinite(r) || r <= 0 ? 0 : Math.floor(r);
+function getRecordChunkSecs() {
+  const raw = process.env["RECORD_CHUNK_SECS"];
+  if (!raw) return DEFAULT_RECORD_CHUNK_SECS;
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed) || parsed <= 0) return 0;
+  return Math.floor(parsed);
 }
-function Se(e) {
-  return e.includes(`${i.sep}chunks${i.sep}`) && e.endsWith(".txt");
+function getSummaryChunkWords() {
+  const raw = process.env["SUM_CHUNK_WORDS"];
+  if (!raw) return DEFAULT_SUMMARY_CHUNK_WORDS;
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed) || parsed <= 50) return DEFAULT_SUMMARY_CHUNK_WORDS;
+  return Math.floor(parsed);
 }
-function D(e, r, t) {
+function isChunkTranscriptPath(outPath) {
+  return outPath.includes(`${path.sep}chunks${path.sep}`) && outPath.endsWith(".txt");
+}
+function isChunkSummaryPath(outPath) {
+  return outPath.includes(`${path.sep}chunks${path.sep}`) && outPath.endsWith(".summary.txt");
+}
+function getChunkSummaryPath(chunkTranscriptPath) {
+  const dir = path.dirname(chunkTranscriptPath);
+  const base = path.basename(chunkTranscriptPath, path.extname(chunkTranscriptPath));
+  return path.join(dir, `${base}.summary.txt`);
+}
+function sendBootstrapStatus(state, message, percent) {
   try {
-    n == null || n.webContents.send("bootstrap-status", { state: e, message: r, percent: t });
-  } catch (s) {
-    console.error("failed to send bootstrap-status", s);
+    win == null ? void 0 : win.webContents.send("bootstrap-status", { state, message, percent });
+  } catch (e) {
+    console.error("failed to send bootstrap-status", e);
   }
 }
-function I(e, r, t) {
-  if (!(e != null && e.stdin))
-    return console.error(`[${r}] stdin not available`), !1;
+function sendProcessCommand(proc, label, payload) {
+  if (!(proc == null ? void 0 : proc.stdin)) {
+    console.error(`[${label}] stdin not available`);
+    return false;
+  }
   try {
-    return e.stdin.write(t), !0;
-  } catch (s) {
-    return console.error(`[${r}] failed to write`, s), !1;
+    proc.stdin.write(payload);
+    return true;
+  } catch (e) {
+    console.error(`[${label}] failed to write`, e);
+    return false;
   }
 }
-function ve(e) {
-  return e.startsWith("https:") ? de : le;
+function emitTranscriptReady(outPath, text) {
+  try {
+    win == null ? void 0 : win.webContents.send("transcript-ready", { sessionDir: currentSessionDir, transcriptPath: outPath, text });
+  } catch (e) {
+    console.error("failed to send transcript-ready", e);
+  }
+  try {
+    win == null ? void 0 : win.webContents.send("transcription-status", { state: "done", sessionDir: currentSessionDir, message: "transcription complete" });
+  } catch (e) {
+    console.error("failed to send transcription-status done", e);
+  }
 }
-function ee(e, r, t, s = 0) {
-  return s > 5 ? Promise.reject(new Error("too many redirects")) : new Promise((a, l) => {
-    ve(e).get(e, (d) => {
-      if (d.statusCode && d.statusCode >= 300 && d.statusCode < 400 && d.headers.location) {
-        d.resume(), a(ee(d.headers.location, r, t, s + 1));
+function sendRecordingStatus(state, message) {
+  try {
+    win == null ? void 0 : win.webContents.send("recording-status", { state, sessionDir: currentSessionDir, message });
+  } catch (e) {
+    console.error("failed to send recording-status", e);
+  }
+}
+function handleRecorderErrorLine(message) {
+  const trimmed = message.trim();
+  if (!trimmed) return;
+  if (trimmed.includes("WASAPI loopback not supported")) {
+    console.warn("[record warning]", trimmed);
+    sendRecordingStatus("running", "system audio loopback not supported; recording mic only");
+    return;
+  }
+  if (trimmed.includes("SoundcardRuntimeWarning")) {
+    console.warn("[record warning]", trimmed);
+    return;
+  }
+  recordingFailed = true;
+  sendRecordingStatus("error", trimmed);
+  try {
+    win == null ? void 0 : win.webContents.send("transcription-status", { state: "error", sessionDir: currentSessionDir, message: trimmed });
+  } catch (e) {
+    console.error("failed to send transcription-status error", e);
+  }
+  try {
+    win == null ? void 0 : win.webContents.send("summary-status", { state: "error", sessionDir: currentSessionDir, message: "recording failed" });
+  } catch (e) {
+    console.error("failed to send summary-status error", e);
+  }
+}
+function getHttpClient(url) {
+  return url.startsWith("https:") ? https : http;
+}
+function downloadFile(url, destPath, onProgress, redirects = 0) {
+  if (redirects > 5) {
+    return Promise.reject(new Error("too many redirects"));
+  }
+  return new Promise((resolve, reject) => {
+    const client = getHttpClient(url);
+    const request = client.get(url, (res) => {
+      if (res.statusCode && res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
+        res.resume();
+        resolve(downloadFile(res.headers.location, destPath, onProgress, redirects + 1));
         return;
       }
-      if (d.statusCode !== 200) {
-        d.resume(), l(new Error(`download failed with status ${d.statusCode}`));
+      if (res.statusCode !== 200) {
+        res.resume();
+        reject(new Error(`download failed with status ${res.statusCode}`));
         return;
       }
-      u.mkdirSync(i.dirname(r), { recursive: !0 });
-      const f = `${r}.partial`, w = u.createWriteStream(f);
-      let j = 0;
-      const k = Number(d.headers["content-length"] || 0);
-      d.on("data", (y) => {
-        if (j += y.length, t)
-          if (k > 0) {
-            const ae = Math.min(100, Math.round(j / k * 100));
-            t({ downloaded: j, total: k, percent: ae });
-          } else
-            t({ downloaded: j });
-      }), d.on("error", (y) => {
-        w.close(() => {
-        });
+      fs.mkdirSync(path.dirname(destPath), { recursive: true });
+      const tmpPath = `${destPath}.partial`;
+      const file = fs.createWriteStream(tmpPath);
+      let downloaded = 0;
+      const total = Number(res.headers["content-length"] || 0);
+      res.on("data", (chunk) => {
+        downloaded += chunk.length;
+        if (onProgress) {
+          if (total > 0) {
+            const percent = Math.min(100, Math.round(downloaded / total * 100));
+            onProgress({ downloaded, total, percent });
+          } else {
+            onProgress({ downloaded });
+          }
+        }
+      });
+      res.on("error", (err) => {
+        file.close(() => void 0);
         try {
-          u.unlinkSync(f);
+          fs.unlinkSync(tmpPath);
         } catch {
         }
-        l(y);
-      }), w.on("error", (y) => {
-        d.destroy();
+        reject(err);
+      });
+      file.on("error", (err) => {
+        res.destroy();
         try {
-          u.unlinkSync(f);
+          fs.unlinkSync(tmpPath);
         } catch {
         }
-        l(y);
-      }), w.on("finish", () => {
-        w.close(() => {
-          u.rename(f, r, (y) => {
-            y ? l(y) : a();
+        reject(err);
+      });
+      file.on("finish", () => {
+        file.close(() => {
+          fs.rename(tmpPath, destPath, (err) => {
+            if (err) {
+              reject(err);
+            } else {
+              resolve();
+            }
           });
         });
-      }), d.pipe(w);
-    }).on("error", l);
-  });
-}
-async function G(e) {
-  return new Promise((r, t) => {
-    const s = v(e, ["--version"], { stdio: ["ignore", "pipe", "pipe"] });
-    s.on("error", (a) => t(a)), s.on("exit", (a) => {
-      a === 0 ? r() : t(new Error(`python exited with ${a}`));
-    });
-  });
-}
-async function we() {
-  if (!Q()) {
-    if (b.isPackaged)
-      throw new Error("ffmpeg missing in installer");
-    await new Promise((r, t) => {
-      const s = v("ffmpeg", ["-version"], { stdio: ["ignore", "pipe", "pipe"] });
-      s.on("error", (a) => t(a)), s.on("exit", (a) => {
-        a === 0 ? r() : t(new Error("ffmpeg not available on PATH"));
       });
+      res.pipe(file);
     });
-  }
+    request.on("error", reject);
+  });
 }
-async function Pe() {
-  const e = process.env.MEETING_NOTES_PYTHON;
-  if (e && e.trim()) {
-    if ((e.includes(i.sep) || e.includes("/")) && !u.existsSync(e))
-      throw new Error(`MEETING_NOTES_PYTHON not found at ${e}`);
-    await G(e);
-    return;
-  }
-  if (!u.existsSync(X()) && !u.existsSync(Z())) {
-    if (b.isPackaged)
-      throw new Error("bundled python runtime missing in installer");
-    await G(P());
-  }
-}
-async function ke(e, r) {
-  const t = i.join(E(), "setup.py");
-  return new Promise((s, a) => {
-    var c, d;
-    const l = v(P(), [t, "--whisper-model", e, "--whisper-dir", r], {
-      stdio: ["ignore", "pipe", "pipe"],
-      env: _()
-    });
-    let o = "";
-    (c = l.stdout) == null || c.on("data", (f) => {
-      o += f.toString();
-      const w = o.split(`
-`);
-      o = w.pop() || "";
-      for (const j of w) {
-        const k = j.trim();
-        if (k)
-          try {
-            const y = JSON.parse(k);
-            y.event === "status" ? D("running", y.message || "running setup") : y.event === "done" ? D("running", y.message || "setup complete") : y.event === "error" && D("error", y.message || "setup failed");
-          } catch {
-            console.log("[setup]", k);
-          }
-      }
-    }), (d = l.stderr) == null || d.on("data", (f) => console.error("[setup err]", f.toString().trim())), l.on("error", (f) => a(f)), l.on("exit", (f) => {
-      f === 0 ? s() : a(new Error(`setup failed with code ${f}`));
+async function verifyPythonCommand(command) {
+  return new Promise((resolve, reject) => {
+    const proc = spawn(command, ["--version"], { stdio: ["ignore", "pipe", "pipe"] });
+    proc.on("error", (err) => reject(err));
+    proc.on("exit", (code) => {
+      if (code === 0) resolve();
+      else reject(new Error(`python exited with ${code}`));
     });
   });
 }
-async function xe() {
-  const e = process.env.WHISPER_MODEL || "small.en", r = q(), t = i.join(r, `${e}.pt`);
-  if (u.existsSync(t)) return;
-  const s = i.join(ge(), `${e}.pt`);
-  if (u.existsSync(s)) {
-    u.mkdirSync(r, { recursive: !0 }), u.copyFileSync(s, t);
+async function verifyFfmpegAvailable() {
+  const ffmpegPath = resolveFfmpegPath();
+  if (ffmpegPath) return;
+  if (app.isPackaged) {
+    throw new Error("ffmpeg missing in installer");
+  }
+  await new Promise((resolve, reject) => {
+    const proc = spawn("ffmpeg", ["-version"], { stdio: ["ignore", "pipe", "pipe"] });
+    proc.on("error", (err) => reject(err));
+    proc.on("exit", (code) => {
+      if (code === 0) resolve();
+      else reject(new Error("ffmpeg not available on PATH"));
+    });
+  });
+}
+async function ensurePythonRuntime() {
+  const override = process.env["MEETING_NOTES_PYTHON"];
+  if (override && override.trim()) {
+    const hasPath = override.includes(path.sep) || override.includes("/");
+    if (hasPath && !fs.existsSync(override)) {
+      throw new Error(`MEETING_NOTES_PYTHON not found at ${override}`);
+    }
+    await verifyPythonCommand(override);
     return;
   }
-  if (b.isPackaged)
-    throw new Error(`whisper model missing in installer: ${e}.pt`);
-  await ke(e, r);
+  if (fs.existsSync(getBundledPythonPath())) return;
+  if (fs.existsSync(getUserPythonPath())) return;
+  if (app.isPackaged) {
+    throw new Error("bundled python runtime missing in installer");
+  }
+  await verifyPythonCommand(getPythonCommand());
 }
-function M() {
-  const e = process.env.SUMMODEL;
-  if (e && e.trim()) return e;
-  if (O && u.existsSync(O)) return O;
-  const r = [K(), pe(), i.join(process.env.APP_ROOT, "models")];
-  for (const t of r) {
-    if (!u.existsSync(t)) continue;
-    const s = i.join(t, "Llama-3.2-3B-Instruct-Q4_K_M.gguf");
-    if (u.existsSync(s)) return s;
+async function runSetupScript(whisperModel, whisperDir) {
+  const script = path.join(getBackendRoot(), "setup.py");
+  return new Promise((resolve, reject) => {
+    var _a, _b;
+    const proc = spawn(getPythonCommand(), [script, "--whisper-model", whisperModel, "--whisper-dir", whisperDir], {
+      stdio: ["ignore", "pipe", "pipe"],
+      env: getPythonEnv()
+    });
+    let buf = "";
+    (_a = proc.stdout) == null ? void 0 : _a.on("data", (data) => {
+      buf += data.toString();
+      const parts = buf.split("\n");
+      buf = parts.pop() || "";
+      for (const raw of parts) {
+        const line = raw.trim();
+        if (!line) continue;
+        try {
+          const obj = JSON.parse(line);
+          if (obj.event === "status") {
+            sendBootstrapStatus("running", obj.message || "running setup");
+          } else if (obj.event === "done") {
+            sendBootstrapStatus("running", obj.message || "setup complete");
+          } else if (obj.event === "error") {
+            sendBootstrapStatus("error", obj.message || "setup failed");
+          }
+        } catch {
+          console.log("[setup]", line);
+        }
+      }
+    });
+    (_b = proc.stderr) == null ? void 0 : _b.on("data", (data) => console.error("[setup err]", data.toString().trim()));
+    proc.on("error", (err) => reject(err));
+    proc.on("exit", (code) => {
+      if (code === 0) {
+        resolve();
+      } else {
+        reject(new Error(`setup failed with code ${code}`));
+      }
+    });
+  });
+}
+async function ensureWhisperModel() {
+  const model = process.env["WHISPER_MODEL"] || "small.en";
+  const whisperDir = getWhisperRoot();
+  const modelPath = path.join(whisperDir, `${model}.pt`);
+  if (fs.existsSync(modelPath)) return;
+  const packagedModelPath = path.join(getPackagedWhisperRoot(), `${model}.pt`);
+  if (fs.existsSync(packagedModelPath)) {
+    fs.mkdirSync(whisperDir, { recursive: true });
+    fs.copyFileSync(packagedModelPath, modelPath);
+    return;
+  }
+  if (app.isPackaged) {
+    throw new Error(`whisper model missing in installer: ${model}.pt`);
+  }
+  await runSetupScript(model, whisperDir);
+}
+function resolveSummaryModelPath() {
+  const override = process.env["SUMMODEL"];
+  if (override && override.trim()) return override;
+  if (downloadedSummaryModelPath && fs.existsSync(downloadedSummaryModelPath)) return downloadedSummaryModelPath;
+  const candidates = [getModelsRoot(), getPackagedModelsRoot(), path.join(process.env.APP_ROOT, "models")];
+  for (const modelsDir of candidates) {
+    if (!fs.existsSync(modelsDir)) continue;
+    const preferred = path.join(modelsDir, "Llama-3.2-3B-Instruct-Q4_K_M.gguf");
+    if (fs.existsSync(preferred)) return preferred;
     try {
-      const o = u.readdirSync(t, { withFileTypes: !0 }).filter((c) => c.isFile() && c.name.toLowerCase().endsWith(".gguf")).map((c) => i.join(t, c.name)).sort();
-      if (o.length > 0) return o[0];
-    } catch (l) {
-      console.error("failed to scan models directory", l);
+      const entries = fs.readdirSync(modelsDir, { withFileTypes: true });
+      const ggufs = entries.filter((entry) => entry.isFile() && entry.name.toLowerCase().endsWith(".gguf")).map((entry) => path.join(modelsDir, entry.name)).sort();
+      if (ggufs.length > 0) return ggufs[0];
+    } catch (e) {
+      console.error("failed to scan models directory", e);
     }
-    const a = i.join(t, "ggml-model.bin");
-    if (u.existsSync(a)) return a;
+    const ggmlBin = path.join(modelsDir, "ggml-model.bin");
+    if (fs.existsSync(ggmlBin)) return ggmlBin;
   }
   return null;
 }
-async function De() {
-  const e = process.env.SUMMODEL;
-  if (e && e.trim()) {
-    if (!u.existsSync(e))
-      throw new Error(`summary model not found at ${e}`);
-    return e;
+async function ensureSummaryModel() {
+  const override = process.env["SUMMODEL"];
+  if (override && override.trim()) {
+    if (!fs.existsSync(override)) {
+      throw new Error(`summary model not found at ${override}`);
+    }
+    return override;
   }
-  const r = M();
-  if (r && u.existsSync(r))
-    return O = r, r;
-  if (b.isPackaged)
+  const existing = resolveSummaryModelPath();
+  if (existing && fs.existsSync(existing)) {
+    downloadedSummaryModelPath = existing;
+    return existing;
+  }
+  if (app.isPackaged) {
     throw new Error("summary model missing in installer");
-  const t = process.env.SUMMODEL_URL || ue, s = K();
-  let a = "Llama-3.2-3B-Instruct-Q4_K_M.gguf";
+  }
+  const url = process.env["SUMMODEL_URL"] || DEFAULT_SUMMARY_MODEL_URL;
+  const modelsDir = getModelsRoot();
+  let targetName = "Llama-3.2-3B-Instruct-Q4_K_M.gguf";
   try {
-    const o = new URL(t), c = i.basename(o.pathname);
-    c && (a = c);
+    const parsed = new URL(url);
+    const base = path.basename(parsed.pathname);
+    if (base) targetName = base;
   } catch {
   }
-  const l = i.join(s, a);
-  return D("running", "downloading summary model", 0), await ee(t, l, (o) => {
-    typeof o.percent == "number" && D("running", "downloading summary model", o.percent);
-  }), O = l, l;
+  const targetPath = path.join(modelsDir, targetName);
+  sendBootstrapStatus("running", "downloading summary model", 0);
+  await downloadFile(url, targetPath, (progress) => {
+    if (typeof progress.percent === "number") {
+      sendBootstrapStatus("running", "downloading summary model", progress.percent);
+    }
+  });
+  downloadedSummaryModelPath = targetPath;
+  return targetPath;
 }
-async function W() {
-  return N === "done" ? !0 : R || (N = "running", R = (async () => {
+async function ensureDependencies() {
+  if (setupState === "done") return true;
+  if (setupPromise) return setupPromise;
+  setupState = "running";
+  setupPromise = (async () => {
     try {
-      return await we(), await Pe(), await xe(), await De(), N = "done", D("done", "ready", 100), !0;
+      await verifyFfmpegAvailable();
+      await ensurePythonRuntime();
+      await ensureWhisperModel();
+      await ensureSummaryModel();
+      setupState = "done";
+      sendBootstrapStatus("done", "ready", 100);
+      return true;
     } catch (e) {
-      N = "error";
-      const r = e instanceof Error ? e.message : "setup failed";
-      return D("error", r), !1;
+      setupState = "error";
+      const msg = e instanceof Error ? e.message : "setup failed";
+      sendBootstrapStatus("error", msg);
+      return false;
     } finally {
-      R = null;
+      setupPromise = null;
     }
-  })(), R);
+  })();
+  return setupPromise;
 }
-function Ee(e) {
-  const r = i.join(e, "chunks"), t = i.join(e, "transcript.txt");
-  let s = "";
+function finalizeTranscriptFromChunks(sessionDir) {
+  if (transcriptFinalized) return;
+  transcriptFinalized = true;
+  const chunksDir = path.join(sessionDir, "chunks");
+  const outPath = path.join(sessionDir, "transcript.txt");
+  let combined = "";
   try {
-    const a = u.readdirSync(r).filter((l) => l.endsWith(".txt")).sort();
-    for (const l of a) {
-      const o = u.readFileSync(i.join(r, l), "utf-8").trim();
-      o && (s += (s ? `
-` : "") + o);
+    const files = fs.readdirSync(chunksDir).filter((f) => f.endsWith(".txt")).sort();
+    for (const file of files) {
+      const part = fs.readFileSync(path.join(chunksDir, file), "utf-8").trim();
+      if (part) combined += (combined ? "\n" : "") + part;
     }
-  } catch (a) {
-    console.error("failed to assemble chunk transcripts", a);
+  } catch (e) {
+    console.error("failed to assemble chunk transcripts", e);
   }
   try {
-    u.writeFileSync(t, s);
-  } catch (a) {
-    console.error("failed to write combined transcript", a);
+    fs.writeFileSync(outPath, combined);
+  } catch (e) {
+    console.error("failed to write combined transcript", e);
   }
-  te(t, s);
+  if (chunkSummarizationEnabled) {
+    emitTranscriptReady(outPath, combined);
+  } else {
+    handleTranscriptReady(outPath, combined);
+  }
 }
-function z(e) {
-  if (!e) {
+function startSummarizerIfNeeded(modelPath) {
+  if (!modelPath) {
     console.error("summary model path not set");
     try {
-      n == null || n.webContents.send("summary-status", { state: "error", sessionDir: m, message: "summary model not found" });
-    } catch (t) {
-      console.error("failed to send summary-status error", t);
+      win == null ? void 0 : win.webContents.send("summary-status", { state: "error", sessionDir: currentSessionDir, message: "summary model not found" });
+    } catch (e) {
+      console.error("failed to send summary-status error", e);
     }
     return;
   }
-  if (h) {
-    L && L !== e && I(h, "summarizer", JSON.stringify({ cmd: "load_model", model_path: e }) + `
-`) && (L = e);
+  if (summarizerProcess) {
+    if (currentSummaryModelPath && currentSummaryModelPath !== modelPath) {
+      const ok = sendProcessCommand(summarizerProcess, "summarizer", JSON.stringify({ cmd: "load_model", model_path: modelPath }) + "\n");
+      if (ok) currentSummaryModelPath = modelPath;
+    }
     return;
   }
-  const r = i.join(E(), "summarizer_daemon.py");
-  h = v(P(), [r, "--model-path", e], { stdio: ["pipe", "pipe", "pipe"], env: _() }), L = e, h.stdout ? h.stdout.on("data", (t) => {
-    const s = t.toString();
-    A += s;
-    const a = A.split(`
-`);
-    A = a.pop() || "";
-    for (const l of a)
-      if (l)
-        try {
-          const o = JSON.parse(l);
-          if (o.event === "done") {
-            const c = o.out, d = o.text || "";
-            try {
-              n == null || n.webContents.send("summary-ready", { sessionDir: m, summaryPath: c, text: d });
-            } catch (f) {
-              console.error("failed to send summary-ready", f);
-            }
-            try {
-              n == null || n.webContents.send("summary-status", { state: "done", sessionDir: m, message: "summary complete" });
-            } catch (f) {
-              console.error("failed to send summary-status done", f);
-            }
-          } else if (o.event === "loaded")
-            console.log("[summarizer] loaded", o.model);
-          else if (o.event === "progress") {
-            console.log("[summarizer]", o.msg);
-            try {
-              n == null || n.webContents.send("summary-status", { state: "running", sessionDir: m, message: o.msg || "summarizing" });
-            } catch (c) {
-              console.error("failed to send summary-status running", c);
-            }
-          } else if (o.event === "error") {
-            console.error("[summarizer error]", o.msg);
-            try {
-              n == null || n.webContents.send("summary-status", { state: "error", sessionDir: m, message: o.msg || "summary error" });
-            } catch (c) {
-              console.error("failed to send summary-status error", c);
-            }
-          }
-        } catch (o) {
-          console.error("failed to parse summarizer stdout line", o, l);
-        }
-  }) : console.error("[summarizer] stdout not available"), h.stderr ? h.stderr.on("data", (t) => console.error("[summarizer err]", t.toString().trim())) : console.error("[summarizer] stderr not available"), h.on("error", (t) => {
-    console.error("[summarizer spawn error]", t);
-    try {
-      n == null || n.webContents.send("summary-status", { state: "error", sessionDir: m, message: "failed to start summarizer" });
-    } catch (s) {
-      console.error("failed to send summary-status spawn error", s);
-    }
-  }), h.on("exit", (t) => {
-    console.log("[summarizer] exited", t), h = null;
-  });
-}
-function te(e, r) {
-  try {
-    n == null || n.webContents.send("transcript-ready", { sessionDir: m, transcriptPath: e, text: r });
-  } catch (t) {
-    console.error("failed to send transcript-ready", t);
-  }
-  try {
-    n == null || n.webContents.send("transcription-status", { state: "done", sessionDir: m, message: "transcription complete" });
-  } catch (t) {
-    console.error("failed to send transcription-status done", t);
-  }
-  try {
-    const t = M();
-    if (!t || !u.existsSync(t))
-      throw new Error("summary model not found");
-    z(t);
-    const s = i.join(m || "", "summary.txt");
-    try {
-      n == null || n.webContents.send("summary-status", { state: "starting", sessionDir: m, message: "starting summarization" });
-    } catch (a) {
-      console.error("failed to send summary-status starting", a);
-    }
-    if (!h) throw new Error("summarizer not running");
-    if (!I(h, "summarizer", JSON.stringify({ cmd: "summarize", file: e, out: s }) + `
-`))
-      throw new Error("summarizer stdin not available");
-  } catch (t) {
-    console.error("failed to start summarizer", t);
-    try {
-      n == null || n.webContents.send("summary-status", { state: "error", sessionDir: m, message: "failed to start summarizer" });
-    } catch (s) {
-      console.error("failed to send summary-status error", s);
-    }
-  }
-}
-function _e(e) {
-  if (!g) {
-    console.error("transcriber not running for chunk", e);
-    return;
-  }
-  const r = i.dirname(e), t = i.basename(e, i.extname(e)), s = i.join(r, `${t}.txt`);
-  if (S === 0)
-    try {
-      n == null || n.webContents.send("transcription-status", { state: "starting", sessionDir: m, message: "starting transcription" });
-    } catch (l) {
-      console.error("failed to send transcription-status starting", l);
-    }
-  S += 1, I(g, "transcriber", JSON.stringify({ cmd: "transcribe", wav: e, out: s }) + `
-`) || (S = Math.max(S - 1, 0));
-}
-function re(e) {
-  T += e.toString();
-  const r = T.split(`
-`);
-  T = r.pop() || "";
-  for (const t of r) {
-    const s = t.trim();
-    if (s) {
+  const script = path.join(getBackendRoot(), "summarizer_daemon.py");
+  summarizerProcess = spawn(getPythonCommand(), [script, "--model-path", modelPath], { stdio: ["pipe", "pipe", "pipe"], env: getPythonEnv() });
+  currentSummaryModelPath = modelPath;
+  if (summarizerProcess.stdout) summarizerProcess.stdout.on("data", (d) => {
+    const s = d.toString();
+    summarizerStdoutBuf += s;
+    const parts = summarizerStdoutBuf.split("\n");
+    summarizerStdoutBuf = parts.pop() || "";
+    for (const line of parts) {
+      if (!line) continue;
       try {
-        const a = JSON.parse(s);
-        if (a.event === "chunk" && a.path) {
-          _e(a.path);
-          continue;
-        }
-      } catch {
-      }
-      console.log("[backend]", s);
-    }
-  }
-}
-function ne(e) {
-  if (g) {
-    e && e !== x && I(g, "transcriber", JSON.stringify({ cmd: "load_model", model: e }) + `
-`) && (x = e);
-    return;
-  }
-  const r = i.join(E(), "transcriber_daemon.py");
-  g = v(P(), [r, "--model", e], { stdio: ["pipe", "pipe", "pipe"], env: _() }), x = e, g.stdout ? g.stdout.on("data", (t) => {
-    const s = t.toString();
-    F += s;
-    const a = F.split(`
-`);
-    F = a.pop() || "";
-    for (const l of a)
-      if (l)
-        try {
-          const o = JSON.parse(l);
-          if (o.event === "done") {
-            const c = o.out, d = o.text || "";
-            if (c && Se(c)) {
-              S = Math.max(S - 1, 0), B && S === 0 && m && Ee(m);
-              continue;
+        const obj = JSON.parse(line);
+        if (obj.event === "done") {
+          const summaryOut = obj.out;
+          const summaryText = obj.text || "";
+          if (summaryOut && isChunkSummaryPath(summaryOut)) {
+            pendingChunkSummaries = Math.max(pendingChunkSummaries - 1, 0);
+            if (recordingStopped && pendingChunkTranscriptions === 0 && pendingChunkSummaries === 0 && currentSessionDir && !finalSummaryStarted) {
+              finalizeTranscriptFromChunks(currentSessionDir);
+              startFinalSummaryFromChunks(currentSessionDir);
             }
-            te(c, d);
-          } else if (o.event === "loaded")
-            console.log("[transcriber] loaded", o.model);
-          else if (o.event === "progress") {
-            console.log("[transcriber]", o.msg);
-            try {
-              n == null || n.webContents.send("transcription-status", { state: "running", sessionDir: m, message: o.msg || "transcribing" });
-            } catch (c) {
-              console.error("failed to send transcription-status running", c);
-            }
-          } else if (o.event === "error") {
-            console.error("[transcriber error]", o.msg);
-            try {
-              n == null || n.webContents.send("transcription-status", { state: "error", sessionDir: m, message: o.msg || "transcription error" });
-            } catch (c) {
-              console.error("failed to send transcription-status error", c);
-            }
+            continue;
           }
-        } catch (o) {
-          console.error("failed to parse transcriber stdout line", o, l);
+          try {
+            win == null ? void 0 : win.webContents.send("summary-ready", { sessionDir: currentSessionDir, summaryPath: summaryOut, text: summaryText });
+          } catch (e) {
+            console.error("failed to send summary-ready", e);
+          }
+          try {
+            win == null ? void 0 : win.webContents.send("summary-status", { state: "done", sessionDir: currentSessionDir, message: "summary complete" });
+          } catch (e) {
+            console.error("failed to send summary-status done", e);
+          }
+        } else if (obj.event === "loaded") {
+          console.log("[summarizer] loaded", obj.model);
+        } else if (obj.event === "progress") {
+          console.log("[summarizer]", obj.msg);
+          if (obj.msg && typeof obj.msg === "string" && obj.msg.toLowerCase().includes("loading model")) {
+            continue;
+          }
+          try {
+            const percent = typeof obj.percent === "number" ? obj.percent : void 0;
+            const etaSecs = typeof obj.eta_secs === "number" ? obj.eta_secs : void 0;
+            win == null ? void 0 : win.webContents.send("summary-status", { state: "running", sessionDir: currentSessionDir, message: obj.msg || "summarizing", percent, eta_secs: etaSecs });
+          } catch (e) {
+            console.error("failed to send summary-status running", e);
+          }
+        } else if (obj.event === "error") {
+          console.error("[summarizer error]", obj.msg);
+          try {
+            win == null ? void 0 : win.webContents.send("summary-status", { state: "error", sessionDir: currentSessionDir, message: obj.msg || "summary error" });
+          } catch (e) {
+            console.error("failed to send summary-status error", e);
+          }
         }
-  }) : console.error("[transcriber] stdout not available"), g.stderr ? g.stderr.on("data", (t) => console.error("[transcriber err]", t.toString().trim())) : console.error("[transcriber] stderr not available"), g.on("error", (t) => {
-    console.error("[transcriber spawn error]", t);
-    try {
-      n == null || n.webContents.send("transcription-status", { state: "error", sessionDir: m, message: "failed to start transcriber" });
-    } catch (s) {
-      console.error("failed to send transcription-status spawn error", s);
+      } catch (e) {
+        console.error("failed to parse summarizer stdout line", e, line);
+      }
     }
-  }), g.on("exit", (t) => {
-    console.log("[transcriber] exited", t), g = null;
+  });
+  else console.error("[summarizer] stdout not available");
+  if (summarizerProcess.stderr) summarizerProcess.stderr.on("data", (d) => {
+    const text = d.toString();
+    const lines = text.split("\n");
+    for (const line of lines) {
+      const trimmed = line.trim();
+      if (!trimmed) continue;
+      if (trimmed.startsWith("llama_model_loader:") || trimmed.startsWith("llama_context:")) {
+        continue;
+      }
+      console.error("[summarizer err]", trimmed);
+    }
+  });
+  else console.error("[summarizer] stderr not available");
+  summarizerProcess.on("error", (err) => {
+    console.error("[summarizer spawn error]", err);
+    try {
+      win == null ? void 0 : win.webContents.send("summary-status", { state: "error", sessionDir: currentSessionDir, message: "failed to start summarizer" });
+    } catch (e) {
+      console.error("failed to send summary-status spawn error", e);
+    }
+  });
+  summarizerProcess.on("exit", (code) => {
+    console.log("[summarizer] exited", code);
+    summarizerProcess = null;
   });
 }
-function se() {
-  const e = fe();
-  u.mkdirSync(e, { recursive: !0 });
-  const r = (/* @__PURE__ */ new Date()).toISOString().replace(/[:]/g, "-").replace(/\..+$/, ""), t = i.join(e, r);
-  return u.mkdirSync(t, { recursive: !0 }), t;
+function handleTranscriptReady(outPath, text) {
+  emitTranscriptReady(outPath, text);
+  try {
+    const modelPath = resolveSummaryModelPath();
+    if (!modelPath || !fs.existsSync(modelPath)) {
+      throw new Error("summary model not found");
+    }
+    startSummarizerIfNeeded(modelPath);
+    const summaryOut = path.join(currentSessionDir || "", "summary.txt");
+    try {
+      win == null ? void 0 : win.webContents.send("summary-status", { state: "starting", sessionDir: currentSessionDir, message: "starting summarization" });
+    } catch (e) {
+      console.error("failed to send summary-status starting", e);
+    }
+    if (!summarizerProcess) throw new Error("summarizer not running");
+    const chunkWords = getSummaryChunkWords();
+    if (!sendProcessCommand(summarizerProcess, "summarizer", JSON.stringify({ cmd: "summarize", file: outPath, out: summaryOut, chunk_words: chunkWords }) + "\n")) {
+      throw new Error("summarizer stdin not available");
+    }
+  } catch (e) {
+    console.error("failed to start summarizer", e);
+    try {
+      win == null ? void 0 : win.webContents.send("summary-status", { state: "error", sessionDir: currentSessionDir, message: "failed to start summarizer" });
+    } catch (e2) {
+      console.error("failed to send summary-status error", e2);
+    }
+  }
 }
-async function je() {
-  if (p) {
+function queueChunkTranscription(chunkPath) {
+  if (!transcriberProcess) {
+    console.error("transcriber not running for chunk", chunkPath);
+    return;
+  }
+  const chunkDir = path.dirname(chunkPath);
+  const base = path.basename(chunkPath, path.extname(chunkPath));
+  const outPath = path.join(chunkDir, `${base}.txt`);
+  if (pendingChunkTranscriptions === 0) {
+    try {
+      win == null ? void 0 : win.webContents.send("transcription-status", { state: "starting", sessionDir: currentSessionDir, message: "starting transcription" });
+    } catch (e) {
+      console.error("failed to send transcription-status starting", e);
+    }
+  }
+  pendingChunkTranscriptions += 1;
+  const ok = sendProcessCommand(transcriberProcess, "transcriber", JSON.stringify({ cmd: "transcribe", wav: chunkPath, out: outPath }) + "\n");
+  if (!ok) {
+    pendingChunkTranscriptions = Math.max(pendingChunkTranscriptions - 1, 0);
+  }
+}
+function queueChunkSummary(chunkTranscriptPath, text) {
+  if (!summarizerProcess || !chunkSummarizationEnabled) return;
+  const trimmed = text.trim();
+  if (!trimmed) return;
+  const outPath = getChunkSummaryPath(chunkTranscriptPath);
+  pendingChunkSummaries += 1;
+  const chunkWords = getSummaryChunkWords();
+  const ok = sendProcessCommand(
+    summarizerProcess,
+    "summarizer",
+    JSON.stringify({ cmd: "summarize", text: trimmed, out: outPath, chunk_words: chunkWords, quiet: true }) + "\n"
+  );
+  if (!ok) {
+    pendingChunkSummaries = Math.max(pendingChunkSummaries - 1, 0);
+  }
+}
+function startFinalSummaryFromChunks(sessionDir) {
+  if (finalSummaryStarted) return;
+  finalSummaryStarted = true;
+  const chunksDir = path.join(sessionDir, "chunks");
+  let combined = "";
+  try {
+    const files = fs.readdirSync(chunksDir).filter((f) => f.endsWith(".summary.txt")).sort();
+    for (const file of files) {
+      const part = fs.readFileSync(path.join(chunksDir, file), "utf-8").trim();
+      if (part) combined += (combined ? "\n\n" : "") + part;
+    }
+  } catch (e) {
+    console.error("failed to assemble chunk summaries", e);
+  }
+  if (!combined) {
+    try {
+      win == null ? void 0 : win.webContents.send("summary-status", { state: "error", sessionDir, message: "no chunk summaries available" });
+    } catch (e) {
+      console.error("failed to send summary-status error", e);
+    }
+    return;
+  }
+  try {
+    const modelPath = resolveSummaryModelPath();
+    if (!modelPath || !fs.existsSync(modelPath)) {
+      throw new Error("summary model not found");
+    }
+    startSummarizerIfNeeded(modelPath);
+    const summaryOut = path.join(sessionDir, "summary.txt");
+    try {
+      win == null ? void 0 : win.webContents.send("summary-status", { state: "starting", sessionDir, message: "starting summarization" });
+    } catch (e) {
+      console.error("failed to send summary-status starting", e);
+    }
+    const chunkWords = getSummaryChunkWords();
+    if (!summarizerProcess) throw new Error("summarizer not running");
+    if (!sendProcessCommand(summarizerProcess, "summarizer", JSON.stringify({ cmd: "summarize", text: combined, out: summaryOut, chunk_words: chunkWords }) + "\n")) {
+      throw new Error("summarizer stdin not available");
+    }
+  } catch (e) {
+    console.error("failed to start summarizer from chunks", e);
+    try {
+      win == null ? void 0 : win.webContents.send("summary-status", { state: "error", sessionDir, message: "failed to start summarizer" });
+    } catch (e2) {
+      console.error("failed to send summary-status error", e2);
+    }
+  }
+}
+function handleRecordOutput(data) {
+  recordStdoutBuf += data.toString();
+  const parts = recordStdoutBuf.split("\n");
+  recordStdoutBuf = parts.pop() || "";
+  for (const rawLine of parts) {
+    const line = rawLine.trim();
+    if (!line) continue;
+    try {
+      const obj = JSON.parse(line);
+      if (obj.event === "warning" && obj.msg) {
+        console.warn("[record warning]", obj.msg);
+        sendRecordingStatus("running", obj.msg);
+        continue;
+      }
+      if (obj.event === "chunk" && obj.path) {
+        queueChunkTranscription(obj.path);
+        continue;
+      }
+    } catch {
+    }
+    console.log("[backend]", line);
+  }
+}
+function isWavUsable(wavPath) {
+  try {
+    const stat = fs.statSync(wavPath);
+    return stat.isFile() && stat.size > 44;
+  } catch {
+    return false;
+  }
+}
+function reportRecordingError(message) {
+  sendRecordingStatus("error", message);
+  try {
+    win == null ? void 0 : win.webContents.send("transcription-status", { state: "error", sessionDir: currentSessionDir, message });
+  } catch (e) {
+    console.error("failed to send transcription-status error", e);
+  }
+  try {
+    win == null ? void 0 : win.webContents.send("summary-status", { state: "error", sessionDir: currentSessionDir, message: "recording failed" });
+  } catch (e) {
+    console.error("failed to send summary-status error", e);
+  }
+}
+function startTranscriberIfNeeded(modelName) {
+  if (transcriberProcess) {
+    if (modelName && modelName !== currentModelName) {
+      const ok = sendProcessCommand(transcriberProcess, "transcriber", JSON.stringify({ cmd: "load_model", model: modelName }) + "\n");
+      if (ok) currentModelName = modelName;
+    }
+    return;
+  }
+  const script = path.join(getBackendRoot(), "transcriber_daemon.py");
+  transcriberProcess = spawn(getPythonCommand(), [script, "--model", modelName], { stdio: ["pipe", "pipe", "pipe"], env: getPythonEnv() });
+  currentModelName = modelName;
+  if (transcriberProcess.stdout) transcriberProcess.stdout.on("data", (d) => {
+    const s = d.toString();
+    transcriberStdoutBuf += s;
+    const parts = transcriberStdoutBuf.split("\n");
+    transcriberStdoutBuf = parts.pop() || "";
+    for (const line of parts) {
+      if (!line) continue;
+      try {
+        const obj = JSON.parse(line);
+        if (obj.event === "done") {
+          const outPath = obj.out;
+          const text = obj.text || "";
+          if (outPath && isChunkTranscriptPath(outPath)) {
+            pendingChunkTranscriptions = Math.max(pendingChunkTranscriptions - 1, 0);
+            if (chunkSummarizationEnabled) {
+              queueChunkSummary(outPath, text || "");
+            }
+            if (recordingStopped && pendingChunkTranscriptions === 0 && currentSessionDir) {
+              finalizeTranscriptFromChunks(currentSessionDir);
+              if (chunkSummarizationEnabled && pendingChunkSummaries === 0 && !finalSummaryStarted) {
+                startFinalSummaryFromChunks(currentSessionDir);
+              }
+            }
+            continue;
+          }
+          handleTranscriptReady(outPath, text);
+        } else if (obj.event === "loaded") {
+          console.log("[transcriber] loaded", obj.model);
+        } else if (obj.event === "progress") {
+          console.log("[transcriber]", obj.msg);
+          try {
+            win == null ? void 0 : win.webContents.send("transcription-status", { state: "running", sessionDir: currentSessionDir, message: obj.msg || "transcribing" });
+          } catch (e) {
+            console.error("failed to send transcription-status running", e);
+          }
+        } else if (obj.event === "error") {
+          console.error("[transcriber error]", obj.msg);
+          try {
+            win == null ? void 0 : win.webContents.send("transcription-status", { state: "error", sessionDir: currentSessionDir, message: obj.msg || "transcription error" });
+          } catch (e) {
+            console.error("failed to send transcription-status error", e);
+          }
+        }
+      } catch (e) {
+        console.error("failed to parse transcriber stdout line", e, line);
+      }
+    }
+  });
+  else console.error("[transcriber] stdout not available");
+  if (transcriberProcess.stderr) transcriberProcess.stderr.on("data", (d) => console.error("[transcriber err]", d.toString().trim()));
+  else console.error("[transcriber] stderr not available");
+  transcriberProcess.on("error", (err) => {
+    console.error("[transcriber spawn error]", err);
+    try {
+      win == null ? void 0 : win.webContents.send("transcription-status", { state: "error", sessionDir: currentSessionDir, message: "failed to start transcriber" });
+    } catch (e) {
+      console.error("failed to send transcription-status spawn error", e);
+    }
+  });
+  transcriberProcess.on("exit", (code) => {
+    console.log("[transcriber] exited", code);
+    transcriberProcess = null;
+  });
+}
+function makeSessionDir() {
+  const sessionsRoot = getSessionsRoot();
+  fs.mkdirSync(sessionsRoot, { recursive: true });
+  const ts = (/* @__PURE__ */ new Date()).toISOString().replace(/[:]/g, "-").replace(/\..+$/, "");
+  const sessionDir = path.join(sessionsRoot, ts);
+  fs.mkdirSync(sessionDir, { recursive: true });
+  return sessionDir;
+}
+async function startBackend() {
+  if (backendProcess) {
     console.log("[backend] already running");
     return;
   }
-  if (!await W()) return;
-  T = "", S = 0, B = !1;
-  const r = se();
-  m = r;
-  const t = i.join(r, "audio.wav");
-  console.log("[backend] sessionDir=", r);
+  const ready = await ensureDependencies();
+  if (!ready) return;
+  recordStdoutBuf = "";
+  pendingChunkTranscriptions = 0;
+  pendingChunkSummaries = 0;
+  recordingStopped = false;
+  recordingFailed = false;
+  chunkSummarizationEnabled = false;
+  finalSummaryStarted = false;
+  transcriptFinalized = false;
+  const sessionDir = makeSessionDir();
+  currentSessionDir = sessionDir;
+  const outWav = path.join(sessionDir, "audio.wav");
+  console.log("[backend] sessionDir=", sessionDir);
   try {
-    n == null || n.webContents.send("session-started", { sessionDir: r });
-  } catch (o) {
-    console.error("failed to send session-started", o);
+    win == null ? void 0 : win.webContents.send("session-started", { sessionDir });
+  } catch (e) {
+    console.error("failed to send session-started", e);
   }
-  z(M());
-  const a = [i.join(E(), "record.py"), "--out", t], l = $();
-  l > 0 && a.push("--chunk-secs", String(l)), ne(x), z(M()), p = v(P(), a, {
+  startSummarizerIfNeeded(resolveSummaryModelPath());
+  const scriptPath = path.join(getBackendRoot(), "record.py");
+  const args = [scriptPath, "--out", outWav];
+  const chunkSecs = getRecordChunkSecs();
+  chunkSummarizationEnabled = chunkSecs > 0;
+  if (chunkSecs > 0) {
+    args.push("--chunk-secs", String(chunkSecs));
+  }
+  startTranscriberIfNeeded(currentModelName);
+  startSummarizerIfNeeded(resolveSummaryModelPath());
+  backendProcess = spawn(getPythonCommand(), args, {
     stdio: ["ignore", "pipe", "pipe"],
-    env: _()
-  }), p.stdout ? p.stdout.on("data", (o) => {
-    re(o);
-  }) : console.error("[backend] stdout not available"), p.stderr ? p.stderr.on("data", (o) => {
-    console.error("[backend err]", o.toString().trim());
-  }) : console.error("[backend] stderr not available"), p.on("error", (o) => {
-    console.error("[backend spawn error]", o);
-    try {
-      n == null || n.webContents.send("transcription-status", { state: "error", sessionDir: m, message: "failed to start recorder" });
-    } catch (c) {
-      console.error("failed to send transcription-status spawn error", c);
+    env: getPythonEnv()
+  });
+  if (backendProcess.stdout) backendProcess.stdout.on("data", (data) => {
+    handleRecordOutput(data);
+  });
+  else console.error("[backend] stdout not available");
+  if (backendProcess.stderr) backendProcess.stderr.on("data", (data) => {
+    const text = data.toString();
+    const lines = text.split("\n");
+    for (const line of lines) {
+      const trimmed = line.trim();
+      if (!trimmed) continue;
+      if (trimmed.includes("SoundcardRuntimeWarning")) {
+        handleRecorderErrorLine(trimmed);
+        continue;
+      }
+      console.error("[backend err]", trimmed);
+      handleRecorderErrorLine(trimmed);
     }
-  }), p.on("exit", (o) => {
-    console.log("[backend] exited with code", o), p = null;
+  });
+  else console.error("[backend] stderr not available");
+  backendProcess.on("error", (err) => {
+    console.error("[backend spawn error]", err);
+    try {
+      win == null ? void 0 : win.webContents.send("transcription-status", { state: "error", sessionDir: currentSessionDir, message: "failed to start recorder" });
+    } catch (e) {
+      console.error("failed to send transcription-status spawn error", e);
+    }
+  });
+  backendProcess.on("exit", (code) => {
+    console.log("[backend] exited with code", code);
+    if (code !== 0 && !recordingStopped) {
+      recordingFailed = true;
+      reportRecordingError("recording failed (recorder exited)");
+    }
+    backendProcess = null;
   });
 }
-function oe() {
-  if (!p) {
+function stopBackend() {
+  if (!backendProcess) {
     console.log("[backend] not running");
-    return;
+  } else {
+    backendProcess.kill("SIGTERM");
+    backendProcess = null;
+    console.log("[backend] stop signal sent");
   }
-  if (p.kill("SIGTERM"), p = null, console.log("[backend] stop signal sent"), m) {
-    const e = i.join(m, "audio.wav"), r = i.join(m, "transcript.txt");
-    if (B = !0, $() > 0 && g)
+  if (currentSessionDir) {
+    const wavPath = path.join(currentSessionDir, "audio.wav");
+    const outPath = path.join(currentSessionDir, "transcript.txt");
+    recordingStopped = true;
+    if (recordingFailed || !isWavUsable(wavPath)) {
+      reportRecordingError("no audio captured");
       return;
-    if (g)
+    }
+    const chunkSecs = getRecordChunkSecs();
+    if (chunkSecs > 0) {
+      if (pendingChunkTranscriptions > 0) return;
+      finalizeTranscriptFromChunks(currentSessionDir);
+      if (chunkSummarizationEnabled) {
+        if (pendingChunkSummaries === 0 && !finalSummaryStarted) {
+          startFinalSummaryFromChunks(currentSessionDir);
+        }
+        return;
+      }
+    }
+    if (transcriberProcess) {
       try {
         try {
-          n == null || n.webContents.send("transcription-status", { state: "starting", sessionDir: m, message: "starting transcription" });
-        } catch (s) {
-          console.error("failed to send transcription-status starting", s);
+          win == null ? void 0 : win.webContents.send("transcription-status", { state: "starting", sessionDir: currentSessionDir, message: "starting transcription" });
+        } catch (e) {
+          console.error("failed to send transcription-status starting", e);
         }
-        I(g, "transcriber", JSON.stringify({ cmd: "transcribe", wav: e, out: r }) + `
-`);
-      } catch (s) {
-        console.error("failed to send transcribe command to daemon", s);
+        sendProcessCommand(transcriberProcess, "transcriber", JSON.stringify({ cmd: "transcribe", wav: wavPath, out: outPath }) + "\n");
+      } catch (e) {
+        console.error("failed to send transcribe command to daemon", e);
       }
-    else {
-      const s = i.join(E(), "transcribe.py"), a = x || "small.en";
+    } else {
+      const transScript = path.join(getBackendRoot(), "transcribe.py");
+      const model = currentModelName || "small.en";
       try {
-        n == null || n.webContents.send("transcription-status", { state: "starting", sessionDir: m, message: "starting transcription" });
-      } catch (c) {
-        console.error("failed to send transcription-status starting", c);
+        win == null ? void 0 : win.webContents.send("transcription-status", { state: "starting", sessionDir: currentSessionDir, message: "starting transcription" });
+      } catch (e) {
+        console.error("failed to send transcription-status starting", e);
       }
-      const l = v(P(), [s, "--wav", e, "--model", a, "--out", r], {
+      const tproc = spawn(getPythonCommand(), [transScript, "--wav", wavPath, "--model", model, "--out", outPath], {
         stdio: ["ignore", "pipe", "pipe"],
-        env: _()
+        env: getPythonEnv()
       });
-      let o = "";
-      l.stdout.on("data", (c) => {
-        o += c.toString(), console.log("[transcribe]", c.toString().trim());
-      }), l.stderr.on("data", (c) => {
-        console.error("[transcribe err]", c.toString().trim());
-      }), l.on("exit", (c) => {
-        console.log("[transcribe] exited", c);
-        let d = "";
+      let buf = "";
+      tproc.stdout.on("data", (data) => {
+        buf += data.toString();
+        console.log("[transcribe]", data.toString().trim());
+      });
+      tproc.stderr.on("data", (data) => {
+        console.error("[transcribe err]", data.toString().trim());
+      });
+      tproc.on("exit", (code) => {
+        console.log("[transcribe] exited", code);
+        let text = "";
         try {
-          d = u.readFileSync(r, "utf-8");
-        } catch {
-          d = o;
+          text = fs.readFileSync(outPath, "utf-8");
+        } catch (e) {
+          text = buf;
         }
+        emitTranscriptReady(outPath, text);
         try {
-          n == null || n.webContents.send("transcript-ready", { sessionDir: m, transcriptPath: r, text: d });
-        } catch (f) {
-          console.error("failed to send transcript-ready", f);
+          const state = code === 0 ? "done" : "error";
+          win == null ? void 0 : win.webContents.send("transcription-status", { state, sessionDir: currentSessionDir, message: code === 0 ? "transcription complete" : "transcription failed" });
+        } catch (e) {
+          console.error("failed to send transcription-status exit", e);
         }
-        try {
-          const f = c === 0 ? "done" : "error";
-          n == null || n.webContents.send("transcription-status", { state: f, sessionDir: m, message: c === 0 ? "transcription complete" : "transcription failed" });
-        } catch (f) {
-          console.error("failed to send transcription-status exit", f);
-        }
-        m = null;
+        currentSessionDir = null;
       });
     }
   }
 }
-H.on("backend-start", (e, r = {}) => {
-  (async () => {
-    if (console.log("[ipc] backend-start", r), r && r.model && (x = r.model), p) {
+ipcMain.on("backend-start", (_evt, opts = {}) => {
+  void (async () => {
+    console.log("[ipc] backend-start", opts);
+    if (opts && opts.model) currentModelName = opts.model;
+    if (backendProcess) {
       console.log("[backend] already running");
       return;
     }
-    if (!await W()) return;
-    T = "", S = 0, B = !1;
-    const s = se();
-    m = s;
-    const a = i.join(s, "audio.wav");
-    console.log("[backend] sessionDir=", s);
+    const ready = await ensureDependencies();
+    if (!ready) return;
+    recordStdoutBuf = "";
+    pendingChunkTranscriptions = 0;
+    pendingChunkSummaries = 0;
+    recordingStopped = false;
+    recordingFailed = false;
+    chunkSummarizationEnabled = false;
+    finalSummaryStarted = false;
+    transcriptFinalized = false;
+    const sessionDir = makeSessionDir();
+    currentSessionDir = sessionDir;
+    const outWav = path.join(sessionDir, "audio.wav");
+    console.log("[backend] sessionDir=", sessionDir);
     try {
-      n == null || n.webContents.send("session-started", { sessionDir: s });
-    } catch (d) {
-      console.error("failed to send session-started", d);
+      win == null ? void 0 : win.webContents.send("session-started", { sessionDir });
+    } catch (e) {
+      console.error("failed to send session-started", e);
     }
-    const o = [i.join(E(), "record.py"), "--out", a];
-    r && typeof r.deviceIndex == "number" && o.push("--device-index", String(r.deviceIndex));
-    const c = $();
-    c > 0 && o.push("--chunk-secs", String(c)), ne(x), z(M()), p = v(P(), o, {
-      stdio: ["ignore", "pipe", "pipe"],
-      env: _()
-    }), p.stdout ? p.stdout.on("data", (d) => {
-      re(d);
-    }) : console.error("[backend] stdout not available"), p.stderr ? p.stderr.on("data", (d) => {
-      console.error("[backend err]", d.toString().trim());
-    }) : console.error("[backend] stderr not available"), p.on("error", (d) => {
-      console.error("[backend spawn error]", d);
-      try {
-        n == null || n.webContents.send("transcription-status", { state: "error", sessionDir: m, message: "failed to start recorder" });
-      } catch (f) {
-        console.error("failed to send transcription-status spawn error", f);
+    const scriptPath = path.join(getBackendRoot(), "record.py");
+    const args = [scriptPath, "--out", outWav];
+    if (opts && typeof opts.deviceIndex === "number") {
+      if (opts.deviceIndex === -1) {
+        args.push("--mix-system");
+      } else {
+        args.push("--device-index", String(opts.deviceIndex));
       }
-    }), p.on("exit", (d) => {
-      console.log("[backend] exited with code", d), p = null;
+    }
+    const chunkSecs = getRecordChunkSecs();
+    chunkSummarizationEnabled = chunkSecs > 0;
+    if (chunkSecs > 0) {
+      args.push("--chunk-secs", String(chunkSecs));
+    }
+    startTranscriberIfNeeded(currentModelName);
+    startSummarizerIfNeeded(resolveSummaryModelPath());
+    backendProcess = spawn(getPythonCommand(), args, {
+      stdio: ["ignore", "pipe", "pipe"],
+      env: getPythonEnv()
+    });
+    if (backendProcess.stdout) backendProcess.stdout.on("data", (data) => {
+      handleRecordOutput(data);
+    });
+    else console.error("[backend] stdout not available");
+    if (backendProcess.stderr) backendProcess.stderr.on("data", (data) => {
+      const text = data.toString();
+      const lines = text.split("\n");
+      for (const line of lines) {
+        const trimmed = line.trim();
+        if (!trimmed) continue;
+        if (trimmed.includes("SoundcardRuntimeWarning")) {
+          handleRecorderErrorLine(trimmed);
+          continue;
+        }
+        console.error("[backend err]", trimmed);
+        handleRecorderErrorLine(trimmed);
+      }
+    });
+    else console.error("[backend] stderr not available");
+    backendProcess.on("error", (err) => {
+      console.error("[backend spawn error]", err);
+      try {
+        win == null ? void 0 : win.webContents.send("transcription-status", { state: "error", sessionDir: currentSessionDir, message: "failed to start recorder" });
+      } catch (e) {
+        console.error("failed to send transcription-status spawn error", e);
+      }
+    });
+    backendProcess.on("exit", (code) => {
+      console.log("[backend] exited with code", code);
+      if (code !== 0 && !recordingStopped) {
+        recordingFailed = true;
+        reportRecordingError("recording failed (recorder exited)");
+      }
+      backendProcess = null;
     });
   })();
 });
-H.on("backend-stop", () => {
-  console.log("[ipc] backend-stop"), oe();
+ipcMain.on("backend-stop", () => {
+  console.log("[ipc] backend-stop");
+  stopBackend();
 });
-H.handle("list-devices", async () => {
-  const e = i.join(E(), "devices.py");
-  return new Promise((r) => {
-    const t = v(P(), [e], { stdio: ["ignore", "pipe", "pipe"], env: _() });
-    let s = "";
-    t.stdout.on("data", (a) => s += a.toString()), t.stderr.on("data", (a) => console.error("[devices err]", a.toString().trim())), t.on("exit", () => {
+ipcMain.handle("list-devices", async () => {
+  const script = path.join(getBackendRoot(), "devices.py");
+  return new Promise((resolve) => {
+    const p = spawn(getPythonCommand(), [script], { stdio: ["ignore", "pipe", "pipe"], env: getPythonEnv() });
+    let out = "";
+    p.stdout.on("data", (d) => out += d.toString());
+    p.stderr.on("data", (d) => console.error("[devices err]", d.toString().trim()));
+    p.on("exit", () => {
       try {
-        const a = JSON.parse(s || "{}");
-        r(a);
-      } catch {
-        r({ error: "failed to parse devices", raw: s });
+        const json = JSON.parse(out || "{}");
+        resolve(json);
+      } catch (e) {
+        resolve({ error: "failed to parse devices", raw: out });
       }
     });
   });
 });
-function ie() {
-  n = new J({
+function createWindow() {
+  win = new BrowserWindow({
     width: 1e3,
     height: 700,
-    icon: i.join(process.env.VITE_PUBLIC, "electron-vite.svg"),
+    icon: path.join(process.env.VITE_PUBLIC, "electron-vite.svg"),
     webPreferences: {
-      preload: i.join(V, "preload.mjs")
+      preload: path.join(__dirname$1, "preload.mjs")
     }
-  }), n.webContents.on("did-finish-load", () => {
-    n == null || n.webContents.send("main-process-message", (/* @__PURE__ */ new Date()).toLocaleString()), W();
-  }), U ? n.loadURL(U) : n.loadFile(i.join(Y, "index.html"));
+  });
+  win.webContents.on("did-finish-load", () => {
+    win == null ? void 0 : win.webContents.send("main-process-message", (/* @__PURE__ */ new Date()).toLocaleString());
+    void ensureDependencies();
+  });
+  if (VITE_DEV_SERVER_URL) {
+    win.loadURL(VITE_DEV_SERVER_URL);
+  } else {
+    win.loadFile(path.join(RENDERER_DIST, "index.html"));
+  }
 }
-b.whenReady().then(() => {
-  ie();
+app.whenReady().then(() => {
+  createWindow();
 });
-b.on("window-all-closed", () => {
-  n = null, process.platform !== "darwin" && b.quit();
+app.on("window-all-closed", () => {
+  win = null;
+  if (process.platform !== "darwin") app.quit();
 });
-b.on("activate", () => {
-  J.getAllWindows().length === 0 && (ie(), je());
+app.on("activate", () => {
+  if (BrowserWindow.getAllWindows().length === 0) {
+    createWindow();
+    void startBackend();
+  }
 });
-b.on("before-quit", () => {
-  if (oe(), g) {
+app.on("before-quit", () => {
+  stopBackend();
+  if (transcriberProcess) {
     try {
-      g.kill("SIGTERM");
+      transcriberProcess.kill("SIGTERM");
     } catch (e) {
       console.error("failed to kill transcriber", e);
     }
-    g = null;
+    transcriberProcess = null;
   }
-  if (h) {
+  if (summarizerProcess) {
     try {
-      h.kill("SIGTERM");
+      summarizerProcess.kill("SIGTERM");
     } catch (e) {
       console.error("failed to kill summarizer", e);
     }
-    h = null;
+    summarizerProcess = null;
   }
 });
 export {
-  Ne as MAIN_DIST,
-  Y as RENDERER_DIST,
-  U as VITE_DEV_SERVER_URL
+  MAIN_DIST,
+  RENDERER_DIST,
+  VITE_DEV_SERVER_URL
 };

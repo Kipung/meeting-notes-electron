@@ -17,10 +17,13 @@ Events (stdout JSON lines):
 import argparse
 import json
 import os
+import re
 import sys
 import threading
 import time
 from typing import Callable, List, Optional
+
+os.environ.setdefault("LLAMA_CPP_LOG_LEVEL", "ERROR")
 
 try:
     from llama_cpp import Llama
@@ -51,13 +54,16 @@ def min_words_from_env(default: int) -> int:
 
 DEFAULT_PROMPT = (
     "You are an assistant that summarizes meeting transcripts.\n"
-    "Produce a concise summary in 5-7 sentences, and then list 3-6 action items if present.\n"
+    "Produce a concise summary in 5-7 sentences.\n"
+    "If there are explicit action items, include a section titled 'Action Items:' with 3-6 bullets.\n"
+    "If there are no action items, omit the Action Items section entirely.\n"
 )
 
 COMBINE_PROMPT = (
     "You are an assistant that synthesizes summaries of multiple meeting sections.\n"
-    "Combine the following section summaries into a cohesive summary (6-10 sentences)\n"
-    "and a consolidated action items list.\n"
+    "Combine the following section summaries into a cohesive summary (6-10 sentences).\n"
+    "If there are explicit action items, include a section titled 'Action Items:' with bullets.\n"
+    "If there are no action items, omit the Action Items section entirely.\n"
 )
 
 
@@ -85,12 +91,21 @@ def summarize_chunks(
     chunks: List[str],
     prompt: str,
     max_tokens: int,
-    on_progress: Optional[Callable[[str], None]],
+    on_progress: Optional[Callable[[str, Optional[int], Optional[int]], None]],
 ) -> List[str]:
     summaries = []
+    total = max(len(chunks), 1)
+    start_all = time.time()
     for i, ch in enumerate(chunks):
         if on_progress:
-            on_progress(f"summarizing chunk {i+1}/{len(chunks)}")
+            percent = ((i + 1) / total) * 80.0
+            elapsed = time.time() - start_all
+            eta_secs = None
+            if i > 0:
+                avg = elapsed / (i + 1)
+                remaining = avg * (total - (i + 1))
+                eta_secs = max(0, int(remaining))
+            on_progress(f"summarizing chunk {i+1}/{len(chunks)}", percent, eta_secs)
         chunk_prompt = prompt + f"Chunk {i+1}/{len(chunks)} summary."
         s = summarize_with_llm(client, ch, chunk_prompt, max_tokens=max_tokens)
         summaries.append(s)
@@ -103,7 +118,7 @@ def summarize_in_passes(
     prompt: str,
     max_tokens: int,
     max_input_words: int,
-    on_progress: Optional[Callable[[str], None]],
+    on_progress: Optional[Callable[[str, Optional[int], Optional[int]], None]],
 ) -> str:
     if not summaries:
         return ""
@@ -115,10 +130,10 @@ def summarize_in_passes(
         combined = "\n\n".join(current)
         if count_words(combined) <= max_input_words:
             if on_progress:
-                on_progress("combining section summaries")
+                on_progress("combining section summaries", 90, None)
             return summarize_with_llm(client, combined, prompt, max_tokens=max_tokens)
         if on_progress:
-            on_progress(f"combining summaries pass {round_num} ({len(current)} items)")
+            on_progress(f"combining summaries pass {round_num} ({len(current)} items)", 90, None)
         combined_chunks = chunk_text_by_words(combined, max_input_words)
         next_summaries = summarize_chunks(client, combined_chunks, prompt, max_tokens=256, on_progress=on_progress)
         current = next_summaries
@@ -126,22 +141,31 @@ def summarize_in_passes(
     return current[0]
 
 
+def max_tokens_from_env(var_name: str, default: int, minimum: int) -> int:
+    raw = os.getenv(var_name, "").strip()
+    if raw.isdigit():
+        return max(int(raw), minimum)
+    return default
+
+
 def hierarchical_summarize(
     client: Llama,
     text: str,
     tmp_max_words: int = 800,
     n_ctx: int = 2048,
-    on_progress: Optional[Callable[[str], None]] = None,
+    on_progress: Optional[Callable[[str, Optional[int], Optional[int]], None]] = None,
 ) -> str:
+    chunk_max_tokens = max_tokens_from_env("SUM_MAX_TOKENS", 192, 64)
+    combine_max_tokens = max_tokens_from_env("SUM_COMBINE_MAX_TOKENS", 256, 96)
     chunk_word_limit = min(tmp_max_words, estimate_max_words(n_ctx, 256, DEFAULT_PROMPT))
     chunks = chunk_text_by_words(text, max_words=chunk_word_limit)
     if on_progress:
-        on_progress(f"summarizing {len(chunks)} chunk(s)")
+        on_progress(f"summarizing {len(chunks)} chunk(s)", 5, None)
     chunk_summaries = summarize_chunks(
         client,
         chunks,
         DEFAULT_PROMPT,
-        max_tokens=256,
+        max_tokens=chunk_max_tokens,
         on_progress=on_progress,
     )
     max_summary_words = estimate_max_words(n_ctx, 512, COMBINE_PROMPT)
@@ -149,7 +173,7 @@ def hierarchical_summarize(
         client,
         chunk_summaries,
         COMBINE_PROMPT,
-        max_tokens=512,
+        max_tokens=combine_max_tokens,
         max_input_words=max_summary_words,
         on_progress=on_progress,
     )
@@ -157,9 +181,60 @@ def hierarchical_summarize(
 
 def create_llama(model_path: str, n_ctx: int) -> Llama:
     try:
-        return Llama(model_path=model_path, n_ctx=n_ctx)
+        return Llama(model_path=model_path, n_ctx=n_ctx, verbose=False)
     except TypeError:
-        return Llama(model_path=model_path)
+        return Llama(model_path=model_path, verbose=False)
+
+
+ACTION_VERB_RE = re.compile(
+    r"^(schedule|send|follow up|follow-up|implement|decide|review|fix|prepare|update|write|"
+    r"create|plan|set|reach out|confirm|share|draft|compile|check|analyze|investigate|"
+    r"deliver|collect|coordinate|book|arrange|notify|email|call|meet|finalize|submit|"
+    r"approve|summarize|sync|assign|document|test)\b",
+    flags=re.IGNORECASE,
+)
+DATE_HINT_RE = re.compile(
+    r"\b("
+    r"(jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)\w*"
+    r"|mon(day)?|tue(sday)?|wed(nesday)?|thu(rsday)?|fri(day)?|sat(urday)?|sun(day)?"
+    r"|tomorrow|today|next week|next month|this week|this month|by\b|due\b|deadline"
+    r")\b",
+    flags=re.IGNORECASE,
+)
+NUMERIC_DATE_RE = re.compile(r"\b\d{1,2}[/-]\d{1,2}([/-]\d{2,4})?\b")
+
+
+def strip_empty_action_items(text: str) -> str:
+    lines = text.splitlines()
+    out = []
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        if re.match(r"^\s*Action Items\s*:\s*$", line, flags=re.IGNORECASE):
+            j = i + 1
+            items = []
+            while j < len(lines) and lines[j].strip():
+                items.append(lines[j])
+                j += 1
+            combined = " ".join(item.strip() for item in items)
+            if not items or re.search(r"\b(no action items?|none|n/?a)\b", combined, flags=re.IGNORECASE):
+                i = j
+                continue
+            has_action = False
+            for raw in items:
+                cleaned = re.sub(r"^[\s\-\*\d\.\)\:]+", "", raw).strip()
+                if ACTION_VERB_RE.match(cleaned):
+                    has_action = True
+                    break
+                if DATE_HINT_RE.search(cleaned) or NUMERIC_DATE_RE.search(cleaned):
+                    has_action = True
+                    break
+            if not has_action:
+                i = j
+                continue
+        out.append(line)
+        i += 1
+    return "\n".join(out).strip()
 
 
 class SummarizerDaemon:
@@ -184,7 +259,7 @@ class SummarizerDaemon:
             except Exception as e:
                 self.send({"event": "error", "msg": f"failed to load model: {e}"})
 
-    def summarize(self, text: str, out_path: Optional[str], chunk_words: int):
+    def summarize(self, text: str, out_path: Optional[str], chunk_words: int, quiet: bool):
         with self.lock:
             if not self.client:
                 self.send({"event": "error", "msg": "model not loaded", "out": out_path})
@@ -192,8 +267,9 @@ class SummarizerDaemon:
             word_count = count_words(text)
             if word_count < self.min_words:
                 msg = f"transcript too short ({word_count} words); skipping summary"
-                self.send({"event": "progress", "msg": msg})
-                summary = "Not enough content to summarize.\nAction Items: none."
+                if not quiet:
+                    self.send({"event": "progress", "msg": msg})
+                summary = "Not enough content to summarize."
                 if out_path:
                     try:
                         os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
@@ -206,16 +282,22 @@ class SummarizerDaemon:
                 return
             start = time.time()
             try:
+                progress_cb = None
+                if not quiet:
+                    progress_cb = lambda msg, pct=None, eta=None: self.send({"event": "progress", "msg": msg, "percent": pct, "eta_secs": eta})
                 summary = hierarchical_summarize(
                     self.client,
                     text,
                     tmp_max_words=chunk_words,
                     n_ctx=self.n_ctx,
-                    on_progress=lambda msg: self.send({"event": "progress", "msg": msg}),
+                    on_progress=progress_cb,
                 )
+                summary = strip_empty_action_items(summary)
             except Exception as e:
                 self.send({"event": "error", "msg": f"summarization error: {e}", "out": out_path})
                 return
+            if not quiet:
+                self.send({"event": "progress", "msg": "finalizing summary", "percent": 100, "eta_secs": 0})
             dur = time.time() - start
             if out_path:
                 try:
@@ -255,7 +337,8 @@ def repl_loop(daemon: SummarizerDaemon):
                 daemon.send({"event": "error", "msg": "missing file/text in summarize command"})
                 continue
             chunk_words = int(obj.get("chunk_words", 800))
-            daemon.summarize(text or "", obj.get("out"), chunk_words)
+            quiet = bool(obj.get("quiet"))
+            daemon.summarize(text or "", obj.get("out"), chunk_words, quiet)
         elif cmd == "load_model":
             model_path = obj.get("model_path")
             if model_path:

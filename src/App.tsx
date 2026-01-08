@@ -18,6 +18,7 @@ const STEP_LABELS: Record<StepState, string> = {
 function App() {
   const [devices, setDevices] = useState<any[]>([])
   const [selectedDevice, setSelectedDevice] = useState<number | null>(null)
+  const [meetingMode, setMeetingMode] = useState<'online' | 'inperson'>('online')
   const [model, setModel] = useState<string>('small.en')
   const [running, setRunning] = useState(false)
   const [status, setStatus] = useState('idle')
@@ -28,6 +29,8 @@ function App() {
   const [setupState, setSetupState] = useState<StepState>('idle')
   const [setupMessage, setSetupMessage] = useState('')
   const [setupPercent, setSetupPercent] = useState<number | null>(null)
+  const [summaryPercent, setSummaryPercent] = useState<number | null>(null)
+  const [summaryEta, setSummaryEta] = useState<number | null>(null)
   const [elapsedSeconds, setElapsedSeconds] = useState(0)
   const [blinkOn, setBlinkOn] = useState(false)
   const recordingStartRef = useRef<number | null>(null)
@@ -47,6 +50,14 @@ function App() {
 
     ;(window as any).backend.onSession((_ev: any, data: any) => {
       setSessionDir(data.sessionDir || null)
+    })
+
+    ;(window as any).backend.onRecordingStatus((_ev: any, data: any) => {
+      const state = data.state === 'running' ? 'running' : data.state === 'done' ? 'done' : data.state === 'error' ? 'error' : 'idle'
+      setRecordingState(state)
+      if (state === 'running') setStatus('recording')
+      if (state === 'error') setStatus('recording-error')
+      if (data.message) setStatusDetail(data.message)
     })
 
     ;(window as any).backend.onTranscript((_ev: any, data: any) => {
@@ -82,6 +93,16 @@ function App() {
       if (state === 'done') setStatus('summary-ready')
       if (state === 'error') setStatus('summary-error')
       setStatusDetail(data.message || '')
+      if (typeof data.percent === 'number') {
+        setSummaryPercent(data.percent)
+      } else if (state !== 'running') {
+        setSummaryPercent(null)
+      }
+      if (typeof data.eta_secs === 'number') {
+        setSummaryEta(data.eta_secs)
+      } else if (state !== 'running') {
+        setSummaryEta(null)
+      }
     })
 
     ;(window as any).backend.onBootstrapStatus((_ev: any, data: any) => {
@@ -117,6 +138,16 @@ function App() {
     return `${minutes}:${String(seconds).padStart(2, '0')}`
   }
 
+  const formatEta = (secs: number) => {
+    if (!Number.isFinite(secs) || secs <= 0) return ''
+    const minutes = Math.floor(secs / 60)
+    const seconds = Math.floor(secs % 60)
+    if (minutes > 0) {
+      return `ETA ~${minutes}m ${String(seconds).padStart(2, '0')}s`
+    }
+    return `ETA ~${seconds}s`
+  }
+
   const onStart = () => {
     setTranscript('')
     setSummary('')
@@ -129,13 +160,14 @@ function App() {
     recordingStartRef.current = Date.now()
     setElapsedSeconds(0)
     setRunning(true)
-    ;(window as any).backend.start({ deviceIndex: selectedDevice, model })
+    const deviceIndex = meetingMode === 'online' ? -1 : selectedDevice ?? undefined
+    ;(window as any).backend.start({ deviceIndex, model })
   }
 
   const onStop = () => {
     setStatus('stopping')
     setStatusDetail('stopping recording')
-    setRecordingState('done')
+    setRecordingState((prev) => (prev === 'error' ? prev : 'done'))
     setTranscriptionState('running')
     ;(window as any).backend.stop()
   }
@@ -149,6 +181,22 @@ function App() {
 
   return (
     <div style={{ padding: 20 }}>
+      <style>
+        {`@keyframes summary-indeterminate {
+          0% { transform: translateX(-60%); }
+          50% { transform: translateX(10%); }
+          100% { transform: translateX(100%); }
+        }
+        @keyframes summary-spin {
+          0% { transform: rotate(0deg); }
+          100% { transform: rotate(360deg); }
+        }
+        @keyframes summary-pulse {
+          0% { opacity: 0.5; }
+          50% { opacity: 1; }
+          100% { opacity: 0.6; }
+        }`}
+      </style>
       <h1>Meeting Notes</h1>
 
       <div style={{ marginBottom: 16, textAlign: 'left', border: '1px solid #2f2f2f', borderRadius: 8, padding: 12, background: '#1b1b1b', color: '#f5f5f5' }}>
@@ -189,14 +237,41 @@ function App() {
           <span style={{ width: 10, height: 10, borderRadius: 999, background: STEP_COLORS[summarizationState], display: 'inline-block', marginRight: 8 }} />
           <span style={{ width: 120, fontWeight: 600 }}>Summarizing</span>
           <span>{STEP_LABELS[summarizationState]}</span>
+          {summarizationState === 'running' && typeof summaryPercent === 'number' ? <span style={{ marginLeft: 8, color: '#c7c7c7' }}>{summaryPercent.toFixed(1)}%</span> : null}
+          {summarizationState === 'running' && typeof summaryEta === 'number' && summaryEta > 0 ? <span style={{ marginLeft: 8, color: '#9b9b9b' }}>{formatEta(summaryEta)}</span> : null}
+          {summarizationState === 'running' ? <span style={{ marginLeft: 8, width: 14, height: 14, borderRadius: '50%', border: '2px solid #444', borderTopColor: '#9ccc65', display: 'inline-block', animation: 'summary-spin 1s linear infinite' }} /> : null}
         </div>
+        {summarizationState === 'running' ? (
+          <div style={{ marginTop: 6, height: 6, borderRadius: 999, background: '#2f2f2f', overflow: 'hidden' }}>
+            <div
+              style={{
+                height: '100%',
+                width: typeof summaryPercent === 'number' ? `${summaryPercent}%` : '30%',
+                background: 'linear-gradient(90deg, #9ccc65, #66bb6a)',
+                animation: typeof summaryPercent === 'number' ? 'summary-pulse 1.2s ease-in-out infinite' : 'summary-indeterminate 1.4s ease-in-out infinite',
+              }}
+            />
+          </div>
+        ) : null}
         {setupMessage ? <div style={{ marginTop: 8, color: '#c7c7c7' }}>{setupMessage}</div> : null}
         {statusDetail ? <div style={{ marginTop: 8, color: '#c7c7c7' }}>{statusDetail}</div> : null}
       </div>
 
       <div style={{ marginBottom: 8 }}>
+        <label>Meeting type: </label>
+        <select value={meetingMode} onChange={(e) => setMeetingMode(e.target.value === 'inperson' ? 'inperson' : 'online')}>
+          <option value="online">Online (system + mic)</option>
+          <option value="inperson">In-person (mic only)</option>
+        </select>
+      </div>
+
+      <div style={{ marginBottom: 8 }}>
         <label>Input device: </label>
-        <select value={selectedDevice ?? ''} onChange={(e) => setSelectedDevice(e.target.value === '' ? null : Number(e.target.value))}>
+        <select
+          value={selectedDevice ?? ''}
+          onChange={(e) => setSelectedDevice(e.target.value === '' ? null : Number(e.target.value))}
+          disabled={meetingMode === 'online'}
+        >
           <option value="">Default input</option>
           {devices.map((d) => (
             <option key={d.index} value={d.index}>
@@ -204,6 +279,11 @@ function App() {
             </option>
           ))}
         </select>
+        {meetingMode === 'online' ? (
+          <div style={{ marginTop: 6, color: '#9b9b9b', fontSize: 12 }}>
+            Online uses system audio + default mic (Windows WASAPI loopback).
+          </div>
+        ) : null}
       </div>
 
       <div style={{ marginBottom: 8 }}>

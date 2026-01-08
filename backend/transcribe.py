@@ -44,7 +44,8 @@ def main():
     print(f"[transcribe] transcribing {wav} ...", flush=True)
     start = time.time()
     try:
-        result = model.transcribe(wav, language="en", task="transcribe")
+        use_fp16 = device == "cuda"
+        result = model.transcribe(wav, language="en", task="transcribe", fp16=use_fp16)
         text = result.get("text", "").strip()
     except Exception as e:
         print(f"[transcribe] transcription error: {e}", file=sys.stderr, flush=True)

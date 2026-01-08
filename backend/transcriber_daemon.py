@@ -48,6 +48,7 @@ class TranscriberDaemon:
                 download_root = os.environ.get("WHISPER_ROOT")
                 self.model = whisper.load_model(model_name, device=device, download_root=download_root)
                 self.model_name = model_name
+                self.device = device
                 self.send({"event": "loaded", "model": model_name})
             except Exception as e:
                 self.send({"event": "error", "msg": f"failed to load model: {e}"})
@@ -60,7 +61,8 @@ class TranscriberDaemon:
             start = time.time()
             try:
                 self.send({"event": "progress", "msg": f"transcribing {wav_path}"})
-                result = self.model.transcribe(wav_path, language="en", task="transcribe")
+                use_fp16 = self.device == "cuda"
+                result = self.model.transcribe(wav_path, language="en", task="transcribe", fp16=use_fp16)
                 text = result.get("text", "").strip()
             except Exception as e:
                 self.send({"event": "error", "msg": f"transcription error: {e}", "out": out_path})
