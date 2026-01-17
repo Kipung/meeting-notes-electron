@@ -44,7 +44,7 @@ let setupState: 'idle' | 'running' | 'done' | 'error' = 'idle'
 let setupPromise: Promise<boolean> | null = null
 let downloadedSummaryModelPath: string | null = null
 
-const DEFAULT_RECORD_CHUNK_SECS = 60
+const DEFAULT_RECORD_CHUNK_SECS = 0
 
 function getUserDataRoot(): string {
   return app.getPath('userData')
@@ -769,7 +769,7 @@ async function startBackend() {
   startSummarizerIfNeeded(resolveSummaryModelPath())
 
   backendProcess = spawn(getPythonCommand(), args, {
-    stdio: ['ignore', 'pipe', 'pipe'],
+    stdio: ['pipe', 'pipe', 'pipe'],
     env: getPythonEnv(),
   })
 
@@ -874,6 +874,22 @@ function stopBackend() {
   }
 }
 
+function pauseBackend() {
+  if (!backendProcess) {
+    console.log('[backend] not running')
+    return
+  }
+  sendProcessCommand(backendProcess, 'recorder', 'pause\n')
+}
+
+function resumeBackend() {
+  if (!backendProcess) {
+    console.log('[backend] not running')
+    return
+  }
+  sendProcessCommand(backendProcess, 'recorder', 'resume\n')
+}
+
 
 ipcMain.on('backend-start', (_evt, opts: { deviceIndex?: number; model?: string } = {}) => {
   void (async () => {
@@ -917,7 +933,7 @@ ipcMain.on('backend-start', (_evt, opts: { deviceIndex?: number; model?: string 
     startSummarizerIfNeeded(resolveSummaryModelPath())
 
     backendProcess = spawn(getPythonCommand(), args, {
-      stdio: ['ignore', 'pipe', 'pipe'],
+      stdio: ['pipe', 'pipe', 'pipe'],
       env: getPythonEnv(),
     })
 
@@ -950,6 +966,16 @@ ipcMain.on('backend-start', (_evt, opts: { deviceIndex?: number; model?: string 
 ipcMain.on('backend-stop', () => {
   console.log('[ipc] backend-stop')
   stopBackend()
+})
+
+ipcMain.on('backend-pause', () => {
+  console.log('[ipc] backend-pause')
+  pauseBackend()
+})
+
+ipcMain.on('backend-resume', () => {
+  console.log('[ipc] backend-resume')
+  resumeBackend()
 })
 
 ipcMain.handle('list-devices', async () => {

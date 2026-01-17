@@ -1,16 +1,18 @@
 import { useEffect, useRef, useState } from 'react'
 
 const MODEL_CHOICES = ['tiny.en', 'small.en', 'base.en', 'medium.en']
-type StepState = 'idle' | 'running' | 'done' | 'error'
+type StepState = 'idle' | 'running' | 'paused' | 'done' | 'error'
 const STEP_COLORS: Record<StepState, string> = {
   idle: '#9e9e9e',
   running: '#e67e22',
+  paused: '#f1c40f',
   done: '#2e7d32',
   error: '#c62828',
 }
 const STEP_LABELS: Record<StepState, string> = {
   idle: 'idle',
   running: 'in progress',
+  paused: 'paused',
   done: 'done',
   error: 'error',
 }
@@ -31,9 +33,18 @@ function App() {
   const [elapsedSeconds, setElapsedSeconds] = useState(0)
   const [blinkOn, setBlinkOn] = useState(false)
   const recordingStartRef = useRef<number | null>(null)
+  const pauseStartRef = useRef<number | null>(null)
+  const pausedMsRef = useRef(0)
   const [transcript, setTranscript] = useState('')
   const [summary, setSummary] = useState('')
   const [sessionDir, setSessionDir] = useState<string | null>(null)
+
+  const getElapsedSeconds = () => {
+    if (!recordingStartRef.current) return 0
+    const now = Date.now()
+    const pausedMs = pausedMsRef.current + (pauseStartRef.current ? now - pauseStartRef.current : 0)
+    return Math.max(0, Math.floor((now - recordingStartRef.current - pausedMs) / 1000))
+  }
 
   useEffect(() => {
     ;(async () => {
@@ -99,10 +110,7 @@ function App() {
     }
     const interval = setInterval(() => {
       setBlinkOn((prev) => !prev)
-      if (recordingStartRef.current) {
-        const elapsed = Math.floor((Date.now() - recordingStartRef.current) / 1000)
-        setElapsedSeconds(elapsed)
-      }
+      setElapsedSeconds(getElapsedSeconds())
     }, 500)
     return () => clearInterval(interval)
   }, [recordingState])
@@ -127,17 +135,47 @@ function App() {
     setSummarizationState('idle')
     setSessionDir(null)
     recordingStartRef.current = Date.now()
+    pauseStartRef.current = null
+    pausedMsRef.current = 0
     setElapsedSeconds(0)
     setRunning(true)
     ;(window as any).backend.start({ deviceIndex: selectedDevice, model })
   }
 
   const onStop = () => {
+    if (pauseStartRef.current) {
+      pausedMsRef.current += Date.now() - pauseStartRef.current
+      pauseStartRef.current = null
+    }
     setStatus('stopping')
     setStatusDetail('stopping recording')
     setRecordingState('done')
     setTranscriptionState('running')
     ;(window as any).backend.stop()
+  }
+
+  const onPauseToggle = () => {
+    if (!running) return
+    if (recordingState === 'running') {
+      pauseStartRef.current = Date.now()
+      setElapsedSeconds(getElapsedSeconds())
+      setStatus('paused')
+      setStatusDetail('recording paused')
+      setRecordingState('paused')
+      ;(window as any).backend.pause()
+      return
+    }
+    if (recordingState === 'paused') {
+      if (pauseStartRef.current) {
+        pausedMsRef.current += Date.now() - pauseStartRef.current
+        pauseStartRef.current = null
+      }
+      setElapsedSeconds(getElapsedSeconds())
+      setStatus('recording')
+      setStatusDetail('recording audio')
+      setRecordingState('running')
+      ;(window as any).backend.resume()
+    }
   }
 
   const copyToClipboard = (text: string) => {
@@ -146,6 +184,8 @@ function App() {
       console.error('copy to clipboard failed', err)
     })
   }
+
+  const canPause = running && (recordingState === 'running' || recordingState === 'paused')
 
   return (
     <div style={{ padding: 20 }}>
@@ -164,15 +204,15 @@ function App() {
           <span style={{ width: 10, height: 10, borderRadius: 999, background: STEP_COLORS[recordingState], display: 'inline-block', marginRight: 8 }} />
           <span style={{ width: 120, fontWeight: 600 }}>Recording</span>
           <span style={{ minWidth: 90 }}>{STEP_LABELS[recordingState]}</span>
-          {recordingState === 'running' ? (
+          {recordingState === 'running' || recordingState === 'paused' ? (
             <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6, marginLeft: 8 }}>
               <span
                 style={{
                   width: 8,
                   height: 8,
                   borderRadius: 999,
-                  background: blinkOn ? '#ff3b30' : '#4b1b1b',
-                  boxShadow: blinkOn ? '0 0 6px #ff3b30' : 'none',
+                  background: recordingState === 'running' ? (blinkOn ? '#ff3b30' : '#4b1b1b') : '#8e8e8e',
+                  boxShadow: recordingState === 'running' && blinkOn ? '0 0 6px #ff3b30' : 'none',
                   display: 'inline-block',
                 }}
               />
@@ -223,6 +263,9 @@ function App() {
         </button>
         <button onClick={onStop} disabled={!running} style={{ marginLeft: 10 }}>
           Stop
+        </button>
+        <button onClick={onPauseToggle} disabled={!canPause} style={{ marginLeft: 10 }}>
+          {recordingState === 'paused' ? 'Resume' : 'Pause'}
         </button>
         <span style={{ marginLeft: 12 }}>{status}</span>
       </div>

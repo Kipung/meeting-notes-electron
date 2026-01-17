@@ -15,17 +15,61 @@ import json
 import os
 import signal
 import sys
+import threading
 import time
 import wave
 
 import pyaudio
 
 STOP = False
+PAUSED = False
+PAUSE_STARTED_AT = None
+PAUSE_ADJUST = 0.0
+PAUSE_LOCK = threading.Lock()
 
 
 def _handle_stop(signum, frame):
     global STOP
     STOP = True
+
+
+def _set_pause_state(state: bool):
+    global PAUSED, PAUSE_STARTED_AT, PAUSE_ADJUST
+    with PAUSE_LOCK:
+        if state == PAUSED:
+            return
+        if state:
+            PAUSED = True
+            PAUSE_STARTED_AT = time.time()
+        else:
+            PAUSED = False
+            if PAUSE_STARTED_AT is not None:
+                PAUSE_ADJUST += max(0.0, time.time() - PAUSE_STARTED_AT)
+            PAUSE_STARTED_AT = None
+
+
+def _consume_pause_adjustment() -> float:
+    global PAUSE_ADJUST
+    with PAUSE_LOCK:
+        adjust = PAUSE_ADJUST
+        PAUSE_ADJUST = 0.0
+        return adjust
+
+
+def _is_paused() -> bool:
+    with PAUSE_LOCK:
+        return PAUSED
+
+
+def _stdin_listener():
+    for line in sys.stdin:
+        cmd = line.strip().lower()
+        if cmd == "pause":
+            _set_pause_state(True)
+        elif cmd == "resume":
+            _set_pause_state(False)
+        elif cmd == "stop":
+            _handle_stop(None, None)
 
 
 def _open_chunk(path: str, channels: int, rate: int, sample_width: int):
@@ -57,6 +101,8 @@ def main():
     signal.signal(signal.SIGINT, _handle_stop)
 
     pa = pyaudio.PyAudio()
+    stdin_thread = threading.Thread(target=_stdin_listener, daemon=True)
+    stdin_thread.start()
 
     stream_kwargs = dict(
         format=pyaudio.paInt16,
@@ -106,6 +152,26 @@ def main():
 
     try:
         while not STOP:
+            if _is_paused():
+                try:
+                    if stream.is_active():
+                        stream.stop_stream()
+                except Exception:
+                    pass
+                time.sleep(0.05)
+                continue
+            else:
+                try:
+                    if not stream.is_active():
+                        stream.start_stream()
+                except Exception:
+                    pass
+
+            adjust = _consume_pause_adjustment()
+            if adjust > 0:
+                start_t += adjust
+                chunk_start_t += adjust
+
             data = stream.read(args.chunk, exception_on_overflow=False)
             wf.writeframes(data)
             if chunk_wf:
