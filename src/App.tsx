@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
+import './App.css'
 
 const MODEL_CHOICES = ['tiny.en', 'small.en', 'base.en', 'medium.en']
 type StepState = 'idle' | 'running' | 'paused' | 'done' | 'error'
@@ -39,6 +40,10 @@ function App() {
   const [summary, setSummary] = useState('')
   const [sessionDir, setSessionDir] = useState<string | null>(null)
   const [sessionsRoot, setSessionsRoot] = useState<string | null>(null)
+  const [sessionDate, setSessionDate] = useState('')
+  const [sessionModality, setSessionModality] = useState<'online' | 'in-person' | 'hybrid'>('online')
+  const [sessionSubject, setSessionSubject] = useState('')
+  const [coachInitials, setCoachInitials] = useState('')
   const [studentId, setStudentId] = useState('')
   const [studentName, setStudentName] = useState('')
 
@@ -220,9 +225,55 @@ function App() {
   const studentInfo = [studentId ? `Student ID: ${studentId}` : '', studentName ? `Student Name: ${studentName}` : '']
     .filter(Boolean)
     .join('\n')
-  const summaryWithStudent = summary && studentInfo ? `${summary}\n\n${studentInfo}` : summary
+  const sessionDetailsLine = summary
+    ? (() => {
+        const baseParts = [
+          sessionDate || '',
+          sessionModality || '',
+          sessionSubject ? `re: ${sessionSubject}` : '',
+        ].filter(Boolean)
+        let line = baseParts.join(' ')
+        if (coachInitials) {
+          line = line ? `${line} - ${coachInitials}` : coachInitials
+        }
+        return line
+      })()
+    : ''
+  const summaryWithMeta = summary
+    ? [
+        sessionDetailsLine,
+        summary,
+        studentInfo,
+      ]
+        .filter(Boolean)
+        .join('\n\n')
+    : summary
   const sessionDirLabel = sessionDir ? compactPath(sessionDir, sessionsRoot) : null
   const sessionsRootLabel = sessionsRoot ? compactPath(sessionsRoot) : '(loading...)'
+  const primaryActionLabel = !running ? 'Start' : recordingState === 'paused' ? 'Resume' : 'Pause'
+  const primaryActionColor = !running || recordingState === 'paused' ? '#ff3b30' : '#f1f1f1'
+  const primaryActionIcon = !running || recordingState === 'paused' ? (
+    <svg width="14" height="14" viewBox="0 0 14 14" aria-hidden="true">
+      <circle cx="7" cy="7" r="5" fill="currentColor" />
+    </svg>
+  ) : (
+    <svg width="14" height="14" viewBox="0 0 14 14" aria-hidden="true">
+      <rect x="3" y="2.5" width="3" height="9" fill="currentColor" />
+      <rect x="8" y="2.5" width="3" height="9" fill="currentColor" />
+    </svg>
+  )
+  const stopIcon = (
+    <svg width="14" height="14" viewBox="0 0 14 14" aria-hidden="true">
+      <rect x="3" y="3" width="8" height="8" fill="currentColor" />
+    </svg>
+  )
+  const onPrimaryToggle = () => {
+    if (!running) {
+      onStart()
+      return
+    }
+    onPauseToggle()
+  }
 
   const onChangeSaveLocation = async () => {
     try {
@@ -234,15 +285,15 @@ function App() {
   }
 
   return (
-    <div style={{ padding: 16 }}>
-      <h1 style={{ fontSize: 28, margin: '0 0 12px' }}>Meeting Notes</h1>
+    <div className="app-shell">
+      <h1 style={{ fontSize: 24, margin: '0 0 10px' }}>Meeting Notes</h1>
 
-      <div style={{ display: 'flex', alignItems: 'flex-start', gap: 16, flexWrap: 'wrap', marginBottom: 12 }}>
-        <div style={{ flex: '1 1 360px', textAlign: 'left', border: '1px solid #2f2f2f', borderRadius: 8, padding: 12, background: '#1b1b1b', color: '#f5f5f5' }}>
+      <div className="app-columns">
+        <div className="status-card" style={{ textAlign: 'left', border: '1px solid #2f2f2f', borderRadius: 8, padding: 12, background: '#1b1b1b', color: '#f5f5f5' }}>
           <div style={{ marginBottom: 8, fontWeight: 600 }}>Session status</div>
           {sessionDir ? (
             <div style={{ marginBottom: 8, color: '#c7c7c7' }}>
-              Session: <span title={sessionDir}>{sessionDirLabel}</span>
+              Session: <span className="path-label" title={sessionDir}>{sessionDirLabel}</span>
             </div>
           ) : (
             <div style={{ marginBottom: 8, color: '#9b9b9b' }}>Session: (not started)</div>
@@ -285,43 +336,95 @@ function App() {
           </div>
           <div style={{ marginTop: 10, display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
             <span style={{ color: '#c7c7c7' }}>Save location:</span>
-            <span title={sessionsRoot || ''}>{sessionsRootLabel}</span>
-            <button onClick={onChangeSaveLocation} disabled={running || setupState === 'running'}>
-              Change
+            <span className="path-label" title={sessionsRoot || ''}>{sessionsRootLabel}</span>
+            <button
+              onClick={onChangeSaveLocation}
+              disabled={running || setupState === 'running'}
+              style={{
+                border: '1px solid #3a3a3a',
+                background: '#202020',
+                color: '#f1f1f1',
+                padding: '4px 10px',
+                borderRadius: 6,
+                cursor: running || setupState === 'running' ? 'not-allowed' : 'pointer',
+              }}
+            >
+              Change Folder
             </button>
           </div>
           {setupMessage ? <div style={{ marginTop: 8, color: '#c7c7c7' }}>{setupMessage}</div> : null}
           {statusDetail ? <div style={{ marginTop: 8, color: '#c7c7c7' }}>{statusDetail}</div> : null}
         </div>
 
-        <div style={{ flex: '1 1 320px', textAlign: 'left' }}>
-          <div style={{ marginBottom: 8 }}>
-            <div style={{ marginBottom: 6, fontWeight: 600 }}>Student info</div>
-            <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap' }}>
-              <label style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-                <span>Student ID</span>
+        <div className="details-panel" style={{ textAlign: 'left' }}>
+          <div style={{ marginBottom: 6 }}>
+            <div style={{ marginBottom: 6, fontWeight: 600 }}>Session details</div>
+            <div className="form-row">
+              <label className="field field--date">
+                <span>Date</span>
                 <input
-                  value={studentId}
-                  onChange={(e) => setStudentId(e.target.value)}
-                  placeholder="e.g. 20231234"
-                  style={{ minWidth: 200 }}
+                  type="date"
+                  value={sessionDate}
+                  onChange={(e) => setSessionDate(e.target.value)}
+                  style={{ width: '100%' }}
                 />
               </label>
-              <label style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-                <span>Student Name</span>
+              <label className="field field--modality">
+                <span>Modality</span>
+                <select value={sessionModality} onChange={(e) => setSessionModality(e.target.value as 'online' | 'in-person' | 'hybrid')} style={{ width: '100%' }}>
+                  <option value="online">Online</option>
+                  <option value="in-person">In person</option>
+                  <option value="hybrid">Hybrid</option>
+                </select>
+              </label>
+              <label className="field field--subject">
+                <span>Subject</span>
                 <input
-                  value={studentName}
-                  onChange={(e) => setStudentName(e.target.value)}
-                  placeholder="e.g. Kim Minji"
-                  style={{ minWidth: 220 }}
+                  value={sessionSubject}
+                  onChange={(e) => setSessionSubject(e.target.value)}
+                  placeholder="e.g. Study plan check-in"
+                  style={{ width: '100%' }}
                 />
               </label>
             </div>
           </div>
 
           <div style={{ marginBottom: 6 }}>
+            <div style={{ marginBottom: 6, fontWeight: 600 }}>Student info</div>
+            <div className="form-row">
+              <label className="field field--student-id">
+                <span>Student ID</span>
+                <input
+                  value={studentId}
+                  onChange={(e) => setStudentId(e.target.value)}
+                  placeholder="e.g. 20231234"
+                  style={{ width: '100%' }}
+                />
+              </label>
+              <label className="field field--student-name">
+                <span>Student Name</span>
+                <input
+                  value={studentName}
+                  onChange={(e) => setStudentName(e.target.value)}
+                  placeholder="e.g. Kim Minji"
+                  style={{ width: '100%' }}
+                />
+              </label>
+              <label className="field field--coach">
+                <span>Coach</span>
+                <input
+                  value={coachInitials}
+                  onChange={(e) => setCoachInitials(e.target.value)}
+                  placeholder="e.g. JS"
+                  style={{ width: '100%' }}
+                />
+              </label>
+            </div>
+          </div>
+
+          <div className="form-inline" style={{ marginBottom: 6 }}>
             <label>Input device: </label>
-            <select value={selectedDevice ?? ''} onChange={(e) => setSelectedDevice(e.target.value === '' ? null : Number(e.target.value))}>
+            <select className="form-inline__control" value={selectedDevice ?? ''} onChange={(e) => setSelectedDevice(e.target.value === '' ? null : Number(e.target.value))}>
               <option value="">Default input</option>
               {devices.map((d) => (
                 <option key={d.index} value={d.index}>
@@ -331,9 +434,9 @@ function App() {
             </select>
           </div>
 
-          <div style={{ marginBottom: 6 }}>
+          <div className="form-inline" style={{ marginBottom: 6 }}>
             <label>Model: </label>
-            <select value={model} onChange={(e) => setModel(e.target.value)}>
+            <select className="form-inline__control" value={model} onChange={(e) => setModel(e.target.value)}>
               {MODEL_CHOICES.map((m) => (
                 <option key={m} value={m}>
                   {m}
@@ -342,48 +445,71 @@ function App() {
             </select>
           </div>
 
-          <div style={{ marginBottom: 6 }}>
-            <button onClick={onStart} disabled={running || setupState !== 'done'}>
-              Start
+          <div className="control-row" style={{ marginBottom: 6 }}>
+            <button
+              onClick={onPrimaryToggle}
+              disabled={setupState !== 'done' || (running && !canPause)}
+              title={primaryActionLabel}
+              aria-label={primaryActionLabel}
+              style={{
+                width: 30,
+                height: 30,
+                borderRadius: 999,
+                border: '1px solid #2b2b2b',
+                background: '#151515',
+                color: primaryActionColor,
+                cursor: setupState !== 'done' || (running && !canPause) ? 'not-allowed' : 'pointer',
+                display: 'inline-flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                padding: 0,
+                opacity: setupState !== 'done' || (running && !canPause) ? 0.5 : 1,
+              }}
+            >
+              {primaryActionIcon}
             </button>
-            <button onClick={onStop} disabled={!running} style={{ marginLeft: 10 }}>
-              Stop
+            <button
+              onClick={onStop}
+              disabled={!running}
+              title="Stop"
+              aria-label="Stop"
+              style={{
+                width: 30,
+                height: 30,
+                borderRadius: 999,
+                border: '1px solid #2b2b2b',
+                background: '#151515',
+                color: '#f1f1f1',
+                cursor: !running ? 'not-allowed' : 'pointer',
+                display: 'inline-flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                padding: 0,
+                opacity: !running ? 0.5 : 1,
+              }}
+            >
+              {stopIcon}
             </button>
-            <button onClick={onPauseToggle} disabled={!canPause} style={{ marginLeft: 10 }}>
-              {recordingState === 'paused' ? 'Resume' : 'Pause'}
-            </button>
-            <span style={{ marginLeft: 12 }}>{status}</span>
+            <span style={{ marginLeft: 4 }}>{status}</span>
           </div>
         </div>
       </div>
 
-      <div style={{ display: 'flex', gap: 16, flexWrap: 'wrap' }}>
-        <div style={{ flex: '1 1 360px' }}>
+      <div className="output-columns">
+        <div className="output-panel">
           <h3>Transcript</h3>
           <button onClick={() => copyToClipboard(transcript)} disabled={!transcript} style={{ marginBottom: 8 }}>
             Copy transcript
           </button>
           <div style={{ whiteSpace: 'pre-wrap', background: '#151515', color: '#f1f1f1', padding: 10, minHeight: 160, border: '1px solid #2b2b2b', borderRadius: 6 }}>{transcript || '(empty)'}</div>
-          {sessionDir ? (
-            <div style={{ marginTop: 8 }}>
-              Session saved: <a href={`file://${sessionDir}`} title={sessionDir}>{sessionDirLabel}</a>
-              <div style={{ marginTop: 6 }}>
-                <button onClick={() => {
-                  // open session folder in OS file manager
-                  const url = `file://${sessionDir}`
-                  window.open(url)
-                }}>Open Session Folder</button>
-              </div>
-            </div>
-          ) : null}
         </div>
 
-        <div style={{ flex: '1 1 360px' }}>
+        <div className="output-panel">
           <h3>Summary</h3>
-          <button onClick={() => copyToClipboard(summaryWithStudent)} disabled={!summary} style={{ marginBottom: 8 }}>
+          <button onClick={() => copyToClipboard(summaryWithMeta)} disabled={!summary} style={{ marginBottom: 8 }}>
             Copy summary
           </button>
-          <div style={{ whiteSpace: 'pre-wrap', background: '#151515', color: '#f1f1f1', padding: 10, minHeight: 160, border: '1px solid #2b2b2b', borderRadius: 6 }}>{summaryWithStudent || '(empty)'}</div>
+          <div style={{ whiteSpace: 'pre-wrap', background: '#151515', color: '#f1f1f1', padding: 10, minHeight: 160, border: '1px solid #2b2b2b', borderRadius: 6 }}>{summaryWithMeta || '(empty)'}</div>
         </div>
       </div>
     </div>

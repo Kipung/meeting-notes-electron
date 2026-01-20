@@ -1,42 +1,130 @@
 #root {
-  max-width: 1280px;
-  margin: 0 auto;
-  padding: 2rem;
-  text-align: center;
+  width: 100%;
 }
 
-.logo {
-  height: 6em;
-  padding: 1.5em;
-  will-change: filter;
-  transition: filter 300ms;
-}
-.logo:hover {
-  filter: drop-shadow(0 0 2em #646cffaa);
-}
-.logo.react:hover {
-  filter: drop-shadow(0 0 2em #61dafbaa);
+.app-shell {
+  padding: 14px;
 }
 
-@keyframes logo-spin {
-  from {
-    transform: rotate(0deg);
+.app-columns {
+  display: flex;
+  align-items: flex-start;
+  gap: 14px;
+  flex-wrap: wrap;
+  margin-bottom: 10px;
+}
+
+.status-card {
+  flex: 1 1 360px;
+  min-width: 260px;
+}
+
+.details-panel {
+  flex: 1 1 340px;
+  width: 100%;
+  max-width: 460px;
+  min-width: 260px;
+}
+
+.form-row {
+  display: flex;
+  gap: 14px;
+  flex-wrap: wrap;
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.field--date {
+  flex: 1 1 140px;
+  min-width: 130px;
+}
+
+.field--modality {
+  flex: 1 1 120px;
+  min-width: 120px;
+}
+
+.field--subject {
+  flex: 2 1 220px;
+  min-width: 180px;
+}
+
+.field--student-id {
+  flex: 1 1 130px;
+  min-width: 130px;
+}
+
+.field--student-name {
+  flex: 2 1 180px;
+  min-width: 160px;
+}
+
+.field--coach {
+  flex: 1 1 110px;
+  min-width: 110px;
+}
+
+.form-inline {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.form-inline label {
+  white-space: nowrap;
+}
+
+.form-inline__control {
+  flex: 1 1 240px;
+  min-width: 200px;
+}
+
+.control-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.output-columns {
+  display: flex;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+
+.output-panel {
+  flex: 1 1 360px;
+  min-width: 0;
+}
+
+.path-label {
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+@media (max-width: 900px) {
+  .details-panel {
+    max-width: 100%;
   }
-  to {
-    transform: rotate(360deg);
+}
+
+@media (max-width: 680px) {
+  .app-shell {
+    padding: 10px;
   }
-}
 
-@media (prefers-reduced-motion: no-preference) {
-  a:nth-of-type(2) .logo {
-    animation: logo-spin infinite 20s linear;
+  .field {
+    flex: 1 1 100%;
+    min-width: 0;
   }
-}
 
-.card {
-  padding: 2em;
-}
-
-.read-the-docs {
-  color: #888;
+  .form-inline__control {
+    flex-basis: 100%;
+    min-width: 100%;
+  }
 }
