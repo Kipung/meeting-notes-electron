@@ -251,10 +251,14 @@ function App() {
   const sessionDirLabel = sessionDir ? compactPath(sessionDir, sessionsRoot) : null
   const sessionsRootLabel = sessionsRoot ? compactPath(sessionsRoot) : '(loading...)'
   const primaryActionLabel = !running ? 'Start' : recordingState === 'paused' ? 'Resume' : 'Pause'
-  const primaryActionColor = !running || recordingState === 'paused' ? '#ff3b30' : '#f1f1f1'
-  const primaryActionIcon = !running || recordingState === 'paused' ? (
+  const primaryActionColor = !running ? '#ff3b30' : '#f1f1f1'
+  const primaryActionIcon = !running ? (
     <svg width="14" height="14" viewBox="0 0 14 14" aria-hidden="true">
       <circle cx="7" cy="7" r="5" fill="currentColor" />
+    </svg>
+  ) : recordingState === 'paused' ? (
+    <svg width="14" height="14" viewBox="0 0 14 14" aria-hidden="true">
+      <polygon points="4,2.5 11,7 4,11.5" fill="currentColor" />
     </svg>
   ) : (
     <svg width="14" height="14" viewBox="0 0 14 14" aria-hidden="true">
@@ -308,21 +312,6 @@ function App() {
             <span style={{ width: 10, height: 10, borderRadius: 999, background: STEP_COLORS[recordingState], display: 'inline-block', marginRight: 8 }} />
             <span style={{ width: 120, fontWeight: 600 }}>Recording</span>
             <span style={{ minWidth: 90 }}>{STEP_LABELS[recordingState]}</span>
-            {recordingState === 'running' || recordingState === 'paused' ? (
-              <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6, marginLeft: 8 }}>
-                <span
-                  style={{
-                    width: 8,
-                    height: 8,
-                    borderRadius: 999,
-                    background: recordingState === 'running' ? (blinkOn ? '#ff3b30' : '#4b1b1b') : '#8e8e8e',
-                    boxShadow: recordingState === 'running' && blinkOn ? '0 0 6px #ff3b30' : 'none',
-                    display: 'inline-block',
-                  }}
-                />
-                <span style={{ color: '#c7c7c7' }}>{formatElapsed(elapsedSeconds)}</span>
-              </span>
-            ) : null}
           </div>
           <div style={{ display: 'flex', alignItems: 'center', marginBottom: 6 }}>
             <span style={{ width: 10, height: 10, borderRadius: 999, background: STEP_COLORS[transcriptionState], display: 'inline-block', marginRight: 8 }} />
@@ -490,6 +479,23 @@ function App() {
             >
               {stopIcon}
             </button>
+            {recordingState === 'running' || recordingState === 'paused' ? (
+              <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+                <span
+                  style={{
+                    width: 8,
+                    height: 8,
+                    borderRadius: 999,
+                    background: recordingState === 'running' ? (blinkOn ? '#ff3b30' : '#4b1b1b') : '#8e8e8e',
+                    boxShadow: recordingState === 'running' && blinkOn ? '0 0 6px #ff3b30' : 'none',
+                    display: 'inline-block',
+                  }}
+                />
+                <span style={{ color: '#c7c7c7', minWidth: 56, textAlign: 'right', display: 'inline-block' }}>
+                  {formatElapsed(elapsedSeconds)}
+                </span>
+              </span>
+            ) : null}
             <span style={{ marginLeft: 4 }}>{status}</span>
           </div>
         </div>
