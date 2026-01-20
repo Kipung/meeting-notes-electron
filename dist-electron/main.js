@@ -1,4 +1,4 @@
-import { ipcMain, app, BrowserWindow } from "electron";
+import { ipcMain, dialog, app, BrowserWindow } from "electron";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import fs from "node:fs";
@@ -31,8 +31,43 @@ const DEFAULT_RECORD_CHUNK_SECS = 0;
 function getUserDataRoot() {
   return app.getPath("userData");
 }
-function getSessionsRoot() {
+function getSettingsPath() {
+  return path.join(getUserDataRoot(), "settings.json");
+}
+function readSettings() {
+  const settingsPath = getSettingsPath();
+  if (!fs.existsSync(settingsPath)) return {};
+  try {
+    const raw = fs.readFileSync(settingsPath, "utf-8");
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== "object") return {};
+    return parsed;
+  } catch (e) {
+    console.error("failed to read settings", e);
+    return {};
+  }
+}
+function writeSettings(next) {
+  const settingsPath = getSettingsPath();
+  fs.mkdirSync(path.dirname(settingsPath), { recursive: true });
+  fs.writeFileSync(settingsPath, JSON.stringify(next, null, 2));
+}
+function getDefaultSessionsRoot() {
   return path.join(getUserDataRoot(), "sessions");
+}
+function getSessionsRoot() {
+  var _a;
+  const settings = readSettings();
+  const root = (_a = settings.sessionsRoot) == null ? void 0 : _a.trim();
+  return root && root.length > 0 ? root : getDefaultSessionsRoot();
+}
+function setSessionsRoot(root) {
+  const trimmed = root.trim();
+  const settings = readSettings();
+  if (trimmed) settings.sessionsRoot = trimmed;
+  else delete settings.sessionsRoot;
+  writeSettings(settings);
+  return trimmed || getDefaultSessionsRoot();
 }
 function getModelsRoot() {
   return path.join(getUserDataRoot(), "models");
@@ -646,7 +681,7 @@ async function startBackend() {
   const outWav = path.join(sessionDir, "audio.wav");
   console.log("[backend] sessionDir=", sessionDir);
   try {
-    win == null ? void 0 : win.webContents.send("session-started", { sessionDir });
+    win == null ? void 0 : win.webContents.send("session-started", { sessionDir, sessionsRoot: getSessionsRoot() });
   } catch (e) {
     console.error("failed to send session-started", e);
   }
@@ -787,7 +822,7 @@ ipcMain.on("backend-start", (_evt, opts = {}) => {
     const outWav = path.join(sessionDir, "audio.wav");
     console.log("[backend] sessionDir=", sessionDir);
     try {
-      win == null ? void 0 : win.webContents.send("session-started", { sessionDir });
+      win == null ? void 0 : win.webContents.send("session-started", { sessionDir, sessionsRoot: getSessionsRoot() });
     } catch (e) {
       console.error("failed to send session-started", e);
     }
@@ -856,6 +891,26 @@ ipcMain.handle("list-devices", async () => {
       }
     });
   });
+});
+ipcMain.handle("get-sessions-root", () => {
+  return getSessionsRoot();
+});
+ipcMain.handle("choose-sessions-root", async () => {
+  try {
+    const options = {
+      title: "Choose session save location",
+      defaultPath: getSessionsRoot(),
+      properties: ["openDirectory", "createDirectory"]
+    };
+    const result = win ? await dialog.showOpenDialog(win, options) : await dialog.showOpenDialog(options);
+    if (result.canceled || result.filePaths.length === 0) return null;
+    const root = result.filePaths[0];
+    fs.mkdirSync(root, { recursive: true });
+    return setSessionsRoot(root);
+  } catch (e) {
+    console.error("failed to choose sessions root", e);
+    return null;
+  }
 });
 function createWindow() {
   win = new BrowserWindow({

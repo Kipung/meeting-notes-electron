@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain } from 'electron'
+import { app, BrowserWindow, ipcMain, dialog } from 'electron'
 import { spawn } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import fs from 'node:fs'
@@ -46,12 +46,55 @@ let downloadedSummaryModelPath: string | null = null
 
 const DEFAULT_RECORD_CHUNK_SECS = 0
 
+type AppSettings = {
+  sessionsRoot?: string
+}
+
 function getUserDataRoot(): string {
   return app.getPath('userData')
 }
 
-function getSessionsRoot(): string {
+function getSettingsPath(): string {
+  return path.join(getUserDataRoot(), 'settings.json')
+}
+
+function readSettings(): AppSettings {
+  const settingsPath = getSettingsPath()
+  if (!fs.existsSync(settingsPath)) return {}
+  try {
+    const raw = fs.readFileSync(settingsPath, 'utf-8')
+    const parsed = JSON.parse(raw)
+    if (!parsed || typeof parsed !== 'object') return {}
+    return parsed as AppSettings
+  } catch (e) {
+    console.error('failed to read settings', e)
+    return {}
+  }
+}
+
+function writeSettings(next: AppSettings) {
+  const settingsPath = getSettingsPath()
+  fs.mkdirSync(path.dirname(settingsPath), { recursive: true })
+  fs.writeFileSync(settingsPath, JSON.stringify(next, null, 2))
+}
+
+function getDefaultSessionsRoot(): string {
   return path.join(getUserDataRoot(), 'sessions')
+}
+
+function getSessionsRoot(): string {
+  const settings = readSettings()
+  const root = settings.sessionsRoot?.trim()
+  return root && root.length > 0 ? root : getDefaultSessionsRoot()
+}
+
+function setSessionsRoot(root: string): string {
+  const trimmed = root.trim()
+  const settings = readSettings()
+  if (trimmed) settings.sessionsRoot = trimmed
+  else delete settings.sessionsRoot
+  writeSettings(settings)
+  return trimmed || getDefaultSessionsRoot()
 }
 
 function getModelsRoot(): string {
@@ -751,7 +794,7 @@ async function startBackend() {
   const outWav = path.join(sessionDir, 'audio.wav')
   console.log('[backend] sessionDir=', sessionDir)
   try {
-    win?.webContents.send('session-started', { sessionDir })
+    win?.webContents.send('session-started', { sessionDir, sessionsRoot: getSessionsRoot() })
   } catch (e) {
     console.error('failed to send session-started', e)
   }
@@ -912,7 +955,7 @@ ipcMain.on('backend-start', (_evt, opts: { deviceIndex?: number; model?: string 
     const outWav = path.join(sessionDir, 'audio.wav')
     console.log('[backend] sessionDir=', sessionDir)
     try {
-      win?.webContents.send('session-started', { sessionDir })
+      win?.webContents.send('session-started', { sessionDir, sessionsRoot: getSessionsRoot() })
     } catch (e) {
       console.error('failed to send session-started', e)
     }
@@ -994,6 +1037,28 @@ ipcMain.handle('list-devices', async () => {
       }
     })
   })
+})
+
+ipcMain.handle('get-sessions-root', () => {
+  return getSessionsRoot()
+})
+
+ipcMain.handle('choose-sessions-root', async () => {
+  try {
+    const options = {
+      title: 'Choose session save location',
+      defaultPath: getSessionsRoot(),
+      properties: ['openDirectory', 'createDirectory'] as Array<'openDirectory' | 'createDirectory'>,
+    }
+    const result = win ? await dialog.showOpenDialog(win, options) : await dialog.showOpenDialog(options)
+    if (result.canceled || result.filePaths.length === 0) return null
+    const root = result.filePaths[0]
+    fs.mkdirSync(root, { recursive: true })
+    return setSessionsRoot(root)
+  } catch (e) {
+    console.error('failed to choose sessions root', e)
+    return null
+  }
 })
 
 

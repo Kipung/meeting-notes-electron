@@ -4,7 +4,11 @@ interface Window {
   backend: {
     start: (opts?: { deviceIndex?: number; model?: string }) => void
     stop: () => void
+    pause: () => void
+    resume: () => void
     listDevices: () => Promise<any>
+    getSessionsRoot: () => Promise<string | null>
+    chooseSessionsRoot: () => Promise<string | null>
     onSession: (cb: (ev: any, data: any) => void) => void
     onTranscript: (cb: (ev: any, data: any) => void) => void
     onTranscriptionStatus: (cb: (ev: any, data: any) => void) => void

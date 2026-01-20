@@ -6,6 +6,8 @@ contextBridge.exposeInMainWorld('backend', {
   pause: () => ipcRenderer.send('backend-pause'),
   resume: () => ipcRenderer.send('backend-resume'),
   listDevices: () => ipcRenderer.invoke('list-devices'),
+  getSessionsRoot: () => ipcRenderer.invoke('get-sessions-root'),
+  chooseSessionsRoot: () => ipcRenderer.invoke('choose-sessions-root'),
   onSession: (cb: (ev: any, data: any) => void) => ipcRenderer.on('session-started', cb),
   onTranscript: (cb: (ev: any, data: any) => void) => ipcRenderer.on('transcript-ready', cb),
   onTranscriptionStatus: (cb: (ev: any, data: any) => void) => ipcRenderer.on('transcription-status', cb),

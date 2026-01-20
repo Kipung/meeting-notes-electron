@@ -38,6 +38,9 @@ function App() {
   const [transcript, setTranscript] = useState('')
   const [summary, setSummary] = useState('')
   const [sessionDir, setSessionDir] = useState<string | null>(null)
+  const [sessionsRoot, setSessionsRoot] = useState<string | null>(null)
+  const [studentId, setStudentId] = useState('')
+  const [studentName, setStudentName] = useState('')
 
   const getElapsedSeconds = () => {
     if (!recordingStartRef.current) return 0
@@ -56,8 +59,18 @@ function App() {
       }
     })()
 
+    ;(async () => {
+      try {
+        const root = await (window as any).backend.getSessionsRoot()
+        if (root) setSessionsRoot(root)
+      } catch (e) {
+        console.error('getSessionsRoot failed', e)
+      }
+    })()
+
     ;(window as any).backend.onSession((_ev: any, data: any) => {
       setSessionDir(data.sessionDir || null)
+      if (data.sessionsRoot) setSessionsRoot(data.sessionsRoot)
     })
 
     ;(window as any).backend.onTranscript((_ev: any, data: any) => {
@@ -125,6 +138,24 @@ function App() {
     return `${minutes}:${String(seconds).padStart(2, '0')}`
   }
 
+  const normalizePath = (value: string) => value.replace(/\\/g, '/')
+  const compactPath = (value: string, root?: string | null) => {
+    const raw = normalizePath(value)
+    if (root) {
+      const rootNorm = normalizePath(root).replace(/\/+$/, '')
+      const rawLower = raw.toLowerCase()
+      const rootLower = rootNorm.toLowerCase()
+      if (rawLower.startsWith(`${rootLower}/`)) {
+        const rel = raw.slice(rootNorm.length + 1)
+        const rootName = rootNorm.split('/').filter(Boolean).pop()
+        return rootName ? `${rootName}/${rel}` : rel
+      }
+    }
+    const parts = raw.split('/').filter(Boolean)
+    if (parts.length <= 2) return raw
+    return `.../${parts.slice(-2).join('/')}`
+  }
+
   const onStart = () => {
     setTranscript('')
     setSummary('')
@@ -186,116 +217,174 @@ function App() {
   }
 
   const canPause = running && (recordingState === 'running' || recordingState === 'paused')
+  const studentInfo = [studentId ? `Student ID: ${studentId}` : '', studentName ? `Student Name: ${studentName}` : '']
+    .filter(Boolean)
+    .join('\n')
+  const summaryWithStudent = summary && studentInfo ? `${summary}\n\n${studentInfo}` : summary
+  const sessionDirLabel = sessionDir ? compactPath(sessionDir, sessionsRoot) : null
+  const sessionsRootLabel = sessionsRoot ? compactPath(sessionsRoot) : '(loading...)'
+
+  const onChangeSaveLocation = async () => {
+    try {
+      const nextRoot = await (window as any).backend.chooseSessionsRoot()
+      if (nextRoot) setSessionsRoot(nextRoot)
+    } catch (e) {
+      console.error('chooseSessionsRoot failed', e)
+    }
+  }
 
   return (
-    <div style={{ padding: 20 }}>
-      <h1>Meeting Notes</h1>
+    <div style={{ padding: 16 }}>
+      <h1 style={{ fontSize: 28, margin: '0 0 12px' }}>Meeting Notes</h1>
 
-      <div style={{ marginBottom: 16, textAlign: 'left', border: '1px solid #2f2f2f', borderRadius: 8, padding: 12, background: '#1b1b1b', color: '#f5f5f5' }}>
-        <div style={{ marginBottom: 8, fontWeight: 600 }}>Session status</div>
-        {sessionDir ? <div style={{ marginBottom: 8, color: '#c7c7c7' }}>Session: {sessionDir}</div> : <div style={{ marginBottom: 8, color: '#9b9b9b' }}>Session: (not started)</div>}
-        <div style={{ display: 'flex', alignItems: 'center', marginBottom: 6 }}>
-          <span style={{ width: 10, height: 10, borderRadius: 999, background: STEP_COLORS[setupState], display: 'inline-block', marginRight: 8 }} />
-          <span style={{ width: 120, fontWeight: 600 }}>Setup</span>
-          <span style={{ minWidth: 90 }}>{STEP_LABELS[setupState]}</span>
-          {setupState === 'running' && typeof setupPercent === 'number' ? <span style={{ marginLeft: 8, color: '#c7c7c7' }}>{setupPercent}%</span> : null}
+      <div style={{ display: 'flex', alignItems: 'flex-start', gap: 16, flexWrap: 'wrap', marginBottom: 12 }}>
+        <div style={{ flex: '1 1 360px', textAlign: 'left', border: '1px solid #2f2f2f', borderRadius: 8, padding: 12, background: '#1b1b1b', color: '#f5f5f5' }}>
+          <div style={{ marginBottom: 8, fontWeight: 600 }}>Session status</div>
+          {sessionDir ? (
+            <div style={{ marginBottom: 8, color: '#c7c7c7' }}>
+              Session: <span title={sessionDir}>{sessionDirLabel}</span>
+            </div>
+          ) : (
+            <div style={{ marginBottom: 8, color: '#9b9b9b' }}>Session: (not started)</div>
+          )}
+          <div style={{ display: 'flex', alignItems: 'center', marginBottom: 6 }}>
+            <span style={{ width: 10, height: 10, borderRadius: 999, background: STEP_COLORS[setupState], display: 'inline-block', marginRight: 8 }} />
+            <span style={{ width: 120, fontWeight: 600 }}>Setup</span>
+            <span style={{ minWidth: 90 }}>{STEP_LABELS[setupState]}</span>
+            {setupState === 'running' && typeof setupPercent === 'number' ? <span style={{ marginLeft: 8, color: '#c7c7c7' }}>{setupPercent}%</span> : null}
+          </div>
+          <div style={{ display: 'flex', alignItems: 'center', marginBottom: 6 }}>
+            <span style={{ width: 10, height: 10, borderRadius: 999, background: STEP_COLORS[recordingState], display: 'inline-block', marginRight: 8 }} />
+            <span style={{ width: 120, fontWeight: 600 }}>Recording</span>
+            <span style={{ minWidth: 90 }}>{STEP_LABELS[recordingState]}</span>
+            {recordingState === 'running' || recordingState === 'paused' ? (
+              <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6, marginLeft: 8 }}>
+                <span
+                  style={{
+                    width: 8,
+                    height: 8,
+                    borderRadius: 999,
+                    background: recordingState === 'running' ? (blinkOn ? '#ff3b30' : '#4b1b1b') : '#8e8e8e',
+                    boxShadow: recordingState === 'running' && blinkOn ? '0 0 6px #ff3b30' : 'none',
+                    display: 'inline-block',
+                  }}
+                />
+                <span style={{ color: '#c7c7c7' }}>{formatElapsed(elapsedSeconds)}</span>
+              </span>
+            ) : null}
+          </div>
+          <div style={{ display: 'flex', alignItems: 'center', marginBottom: 6 }}>
+            <span style={{ width: 10, height: 10, borderRadius: 999, background: STEP_COLORS[transcriptionState], display: 'inline-block', marginRight: 8 }} />
+            <span style={{ width: 120, fontWeight: 600 }}>Transcribing</span>
+            <span>{STEP_LABELS[transcriptionState]}</span>
+          </div>
+          <div style={{ display: 'flex', alignItems: 'center' }}>
+            <span style={{ width: 10, height: 10, borderRadius: 999, background: STEP_COLORS[summarizationState], display: 'inline-block', marginRight: 8 }} />
+            <span style={{ width: 120, fontWeight: 600 }}>Summarizing</span>
+            <span>{STEP_LABELS[summarizationState]}</span>
+          </div>
+          <div style={{ marginTop: 10, display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+            <span style={{ color: '#c7c7c7' }}>Save location:</span>
+            <span title={sessionsRoot || ''}>{sessionsRootLabel}</span>
+            <button onClick={onChangeSaveLocation} disabled={running || setupState === 'running'}>
+              Change
+            </button>
+          </div>
+          {setupMessage ? <div style={{ marginTop: 8, color: '#c7c7c7' }}>{setupMessage}</div> : null}
+          {statusDetail ? <div style={{ marginTop: 8, color: '#c7c7c7' }}>{statusDetail}</div> : null}
         </div>
-        <div style={{ display: 'flex', alignItems: 'center', marginBottom: 6 }}>
-          <span style={{ width: 10, height: 10, borderRadius: 999, background: STEP_COLORS[recordingState], display: 'inline-block', marginRight: 8 }} />
-          <span style={{ width: 120, fontWeight: 600 }}>Recording</span>
-          <span style={{ minWidth: 90 }}>{STEP_LABELS[recordingState]}</span>
-          {recordingState === 'running' || recordingState === 'paused' ? (
-            <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6, marginLeft: 8 }}>
-              <span
-                style={{
-                  width: 8,
-                  height: 8,
-                  borderRadius: 999,
-                  background: recordingState === 'running' ? (blinkOn ? '#ff3b30' : '#4b1b1b') : '#8e8e8e',
-                  boxShadow: recordingState === 'running' && blinkOn ? '0 0 6px #ff3b30' : 'none',
-                  display: 'inline-block',
-                }}
-              />
-              <span style={{ color: '#c7c7c7' }}>{formatElapsed(elapsedSeconds)}</span>
-            </span>
-          ) : null}
-        </div>
-        <div style={{ display: 'flex', alignItems: 'center', marginBottom: 6 }}>
-          <span style={{ width: 10, height: 10, borderRadius: 999, background: STEP_COLORS[transcriptionState], display: 'inline-block', marginRight: 8 }} />
-          <span style={{ width: 120, fontWeight: 600 }}>Transcribing</span>
-          <span>{STEP_LABELS[transcriptionState]}</span>
-        </div>
-        <div style={{ display: 'flex', alignItems: 'center' }}>
-          <span style={{ width: 10, height: 10, borderRadius: 999, background: STEP_COLORS[summarizationState], display: 'inline-block', marginRight: 8 }} />
-          <span style={{ width: 120, fontWeight: 600 }}>Summarizing</span>
-          <span>{STEP_LABELS[summarizationState]}</span>
-        </div>
-        {setupMessage ? <div style={{ marginTop: 8, color: '#c7c7c7' }}>{setupMessage}</div> : null}
-        {statusDetail ? <div style={{ marginTop: 8, color: '#c7c7c7' }}>{statusDetail}</div> : null}
-      </div>
 
-      <div style={{ marginBottom: 8 }}>
-        <label>Input device: </label>
-        <select value={selectedDevice ?? ''} onChange={(e) => setSelectedDevice(e.target.value === '' ? null : Number(e.target.value))}>
-          <option value="">Default input</option>
-          {devices.map((d) => (
-            <option key={d.index} value={d.index}>
-              {d.index}: {d.name} (in:{d.maxInputChannels} out:{d.maxOutputChannels})
-            </option>
-          ))}
-        </select>
-      </div>
-
-      <div style={{ marginBottom: 8 }}>
-        <label>Model: </label>
-        <select value={model} onChange={(e) => setModel(e.target.value)}>
-          {MODEL_CHOICES.map((m) => (
-            <option key={m} value={m}>
-              {m}
-            </option>
-          ))}
-        </select>
-      </div>
-
-      <div style={{ marginBottom: 12 }}>
-        <button onClick={onStart} disabled={running || setupState !== 'done'}>
-          Start
-        </button>
-        <button onClick={onStop} disabled={!running} style={{ marginLeft: 10 }}>
-          Stop
-        </button>
-        <button onClick={onPauseToggle} disabled={!canPause} style={{ marginLeft: 10 }}>
-          {recordingState === 'paused' ? 'Resume' : 'Pause'}
-        </button>
-        <span style={{ marginLeft: 12 }}>{status}</span>
-      </div>
-
-      <div>
-        <h3>Transcript</h3>
-        <button onClick={() => copyToClipboard(transcript)} disabled={!transcript} style={{ marginBottom: 8 }}>
-          Copy transcript
-        </button>
-        <div style={{ whiteSpace: 'pre-wrap', background: '#151515', color: '#f1f1f1', padding: 10, minHeight: 160, border: '1px solid #2b2b2b', borderRadius: 6 }}>{transcript || '(empty)'}</div>
-        {sessionDir ? (
-          <div style={{ marginTop: 8 }}>
-            Session saved: <a href={`file://${sessionDir}`}>{sessionDir}</a>
-            <div style={{ marginTop: 6 }}>
-              <button onClick={() => {
-                // open session folder in OS file manager
-                const url = `file://${sessionDir}`
-                window.open(url)
-              }}>Open Session Folder</button>
+        <div style={{ flex: '1 1 320px', textAlign: 'left' }}>
+          <div style={{ marginBottom: 8 }}>
+            <div style={{ marginBottom: 6, fontWeight: 600 }}>Student info</div>
+            <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap' }}>
+              <label style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                <span>Student ID</span>
+                <input
+                  value={studentId}
+                  onChange={(e) => setStudentId(e.target.value)}
+                  placeholder="e.g. 20231234"
+                  style={{ minWidth: 200 }}
+                />
+              </label>
+              <label style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                <span>Student Name</span>
+                <input
+                  value={studentName}
+                  onChange={(e) => setStudentName(e.target.value)}
+                  placeholder="e.g. Kim Minji"
+                  style={{ minWidth: 220 }}
+                />
+              </label>
             </div>
           </div>
-        ) : null}
+
+          <div style={{ marginBottom: 6 }}>
+            <label>Input device: </label>
+            <select value={selectedDevice ?? ''} onChange={(e) => setSelectedDevice(e.target.value === '' ? null : Number(e.target.value))}>
+              <option value="">Default input</option>
+              {devices.map((d) => (
+                <option key={d.index} value={d.index}>
+                  {d.index}: {d.name} (in:{d.maxInputChannels} out:{d.maxOutputChannels})
+                </option>
+              ))}
+            </select>
+          </div>
+
+          <div style={{ marginBottom: 6 }}>
+            <label>Model: </label>
+            <select value={model} onChange={(e) => setModel(e.target.value)}>
+              {MODEL_CHOICES.map((m) => (
+                <option key={m} value={m}>
+                  {m}
+                </option>
+              ))}
+            </select>
+          </div>
+
+          <div style={{ marginBottom: 6 }}>
+            <button onClick={onStart} disabled={running || setupState !== 'done'}>
+              Start
+            </button>
+            <button onClick={onStop} disabled={!running} style={{ marginLeft: 10 }}>
+              Stop
+            </button>
+            <button onClick={onPauseToggle} disabled={!canPause} style={{ marginLeft: 10 }}>
+              {recordingState === 'paused' ? 'Resume' : 'Pause'}
+            </button>
+            <span style={{ marginLeft: 12 }}>{status}</span>
+          </div>
+        </div>
       </div>
 
-      <div style={{ marginTop: 16 }}>
-        <h3>Summary</h3>
-        <button onClick={() => copyToClipboard(summary)} disabled={!summary} style={{ marginBottom: 8 }}>
-          Copy summary
-        </button>
-        <div style={{ whiteSpace: 'pre-wrap', background: '#151515', color: '#f1f1f1', padding: 10, minHeight: 160, border: '1px solid #2b2b2b', borderRadius: 6 }}>{summary || '(empty)'}</div>
+      <div style={{ display: 'flex', gap: 16, flexWrap: 'wrap' }}>
+        <div style={{ flex: '1 1 360px' }}>
+          <h3>Transcript</h3>
+          <button onClick={() => copyToClipboard(transcript)} disabled={!transcript} style={{ marginBottom: 8 }}>
+            Copy transcript
+          </button>
+          <div style={{ whiteSpace: 'pre-wrap', background: '#151515', color: '#f1f1f1', padding: 10, minHeight: 160, border: '1px solid #2b2b2b', borderRadius: 6 }}>{transcript || '(empty)'}</div>
+          {sessionDir ? (
+            <div style={{ marginTop: 8 }}>
+              Session saved: <a href={`file://${sessionDir}`} title={sessionDir}>{sessionDirLabel}</a>
+              <div style={{ marginTop: 6 }}>
+                <button onClick={() => {
+                  // open session folder in OS file manager
+                  const url = `file://${sessionDir}`
+                  window.open(url)
+                }}>Open Session Folder</button>
+              </div>
+            </div>
+          ) : null}
+        </div>
+
+        <div style={{ flex: '1 1 360px' }}>
+          <h3>Summary</h3>
+          <button onClick={() => copyToClipboard(summaryWithStudent)} disabled={!summary} style={{ marginBottom: 8 }}>
+            Copy summary
+          </button>
+          <div style={{ whiteSpace: 'pre-wrap', background: '#151515', color: '#f1f1f1', padding: 10, minHeight: 160, border: '1px solid #2b2b2b', borderRadius: 6 }}>{summaryWithStudent || '(empty)'}</div>
+        </div>
       </div>
     </div>
   )

@@ -6,6 +6,8 @@ electron.contextBridge.exposeInMainWorld("backend", {
   pause: () => electron.ipcRenderer.send("backend-pause"),
   resume: () => electron.ipcRenderer.send("backend-resume"),
   listDevices: () => electron.ipcRenderer.invoke("list-devices"),
+  getSessionsRoot: () => electron.ipcRenderer.invoke("get-sessions-root"),
+  chooseSessionsRoot: () => electron.ipcRenderer.invoke("choose-sessions-root"),
   onSession: (cb) => electron.ipcRenderer.on("session-started", cb),
   onTranscript: (cb) => electron.ipcRenderer.on("transcript-ready", cb),
   onTranscriptionStatus: (cb) => electron.ipcRenderer.on("transcription-status", cb),
