@@ -86,14 +86,18 @@ if (!fs.existsSync(ffmpegBin)) {
   errors.push(`missing ffmpeg binary: ${ffmpegBin}`)
 }
 
-const libDir = path.join(root, 'lib')
-if (!fs.existsSync(libDir)) {
-  errors.push(`missing ffmpeg lib directory: ${libDir}`)
-} else {
-  const libEntries = fs.readdirSync(libDir)
-  const hasAvDevice = libEntries.some((f) => f.startsWith('libavdevice') && (f.endsWith('.dylib') || f.endsWith('.so')))
-  if (!hasAvDevice) {
-    errors.push(`missing ffmpeg libs in ${libDir} (expected libavdevice*.dylib)`)
+if (process.platform !== 'win32') {
+  const libDir = path.join(root, 'lib')
+  if (!fs.existsSync(libDir)) {
+    errors.push(`missing ffmpeg lib directory: ${libDir}`)
+  } else {
+    const libEntries = fs.readdirSync(libDir)
+    const hasAvDevice = libEntries.some((f) =>
+      f.startsWith('libavdevice') && (f.endsWith('.dylib') || f.endsWith('.so'))
+    )
+    if (!hasAvDevice) {
+      errors.push(`missing ffmpeg libs in ${libDir} (expected libavdevice*.dylib)`)
+    }
   }
 }
 
