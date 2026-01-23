@@ -16,18 +16,13 @@ let win;
 let backendProcess = null;
 let currentSessionDir = null;
 let currentModelName = "small.en";
-let transcriberProcess = null;
-let transcriberStdoutBuf = "";
 let summarizerProcess = null;
 let summarizerStdoutBuf = "";
 let currentSummaryModelPath = null;
 let recordStdoutBuf = "";
-let pendingChunkTranscriptions = 0;
-let recordingStopped = false;
 let setupState = "idle";
 let setupPromise = null;
 let downloadedSummaryModelPath = null;
-const DEFAULT_RECORD_CHUNK_SECS = 0;
 function getUserDataRoot() {
   return app.getPath("userData");
 }
@@ -136,16 +131,6 @@ function getPythonEnv() {
     }
   }
   return env;
-}
-function getRecordChunkSecs() {
-  const raw = process.env["RECORD_CHUNK_SECS"];
-  if (!raw) return DEFAULT_RECORD_CHUNK_SECS;
-  const parsed = Number(raw);
-  if (!Number.isFinite(parsed) || parsed <= 0) return 0;
-  return Math.floor(parsed);
-}
-function isChunkTranscriptPath(outPath) {
-  return outPath.includes(`${path.sep}chunks${path.sep}`) && outPath.endsWith(".txt");
 }
 function sendBootstrapStatus(state, message, percent) {
   try {
@@ -414,26 +399,6 @@ async function ensureDependencies() {
   })();
   return setupPromise;
 }
-function finalizeTranscriptFromChunks(sessionDir) {
-  const chunksDir = path.join(sessionDir, "chunks");
-  const outPath = path.join(sessionDir, "transcript.txt");
-  let combined = "";
-  try {
-    const files = fs.readdirSync(chunksDir).filter((f) => f.endsWith(".txt")).sort();
-    for (const file of files) {
-      const part = fs.readFileSync(path.join(chunksDir, file), "utf-8").trim();
-      if (part) combined += (combined ? "\n" : "") + part;
-    }
-  } catch (e) {
-    console.error("failed to assemble chunk transcripts", e);
-  }
-  try {
-    fs.writeFileSync(outPath, combined);
-  } catch (e) {
-    console.error("failed to write combined transcript", e);
-  }
-  handleTranscriptReady(outPath, combined);
-}
 function startSummarizerIfNeeded(modelPath) {
   if (!modelPath) {
     console.error("summary model path not set");
@@ -550,27 +515,6 @@ function handleTranscriptReady(outPath, text) {
     }
   }
 }
-function queueChunkTranscription(chunkPath) {
-  if (!transcriberProcess) {
-    console.error("transcriber not running for chunk", chunkPath);
-    return;
-  }
-  const chunkDir = path.dirname(chunkPath);
-  const base = path.basename(chunkPath, path.extname(chunkPath));
-  const outPath = path.join(chunkDir, `${base}.txt`);
-  if (pendingChunkTranscriptions === 0) {
-    try {
-      win == null ? void 0 : win.webContents.send("transcription-status", { state: "starting", sessionDir: currentSessionDir, message: "starting transcription" });
-    } catch (e) {
-      console.error("failed to send transcription-status starting", e);
-    }
-  }
-  pendingChunkTranscriptions += 1;
-  const ok = sendProcessCommand(transcriberProcess, "transcriber", JSON.stringify({ cmd: "transcribe", wav: chunkPath, out: outPath }) + "\n");
-  if (!ok) {
-    pendingChunkTranscriptions = Math.max(pendingChunkTranscriptions - 1, 0);
-  }
-}
 function handleRecordOutput(data) {
   recordStdoutBuf += data.toString();
   const parts = recordStdoutBuf.split("\n");
@@ -580,83 +524,16 @@ function handleRecordOutput(data) {
     if (!line) continue;
     try {
       const obj = JSON.parse(line);
-      if (obj.event === "chunk" && obj.path) {
-        queueChunkTranscription(obj.path);
+      if (obj.event === "done" && obj.out) {
+        const outPath = obj.out;
+        const text = obj.text || "";
+        handleTranscriptReady(outPath, text);
         continue;
       }
     } catch {
     }
     console.log("[backend]", line);
   }
-}
-function startTranscriberIfNeeded(modelName) {
-  if (transcriberProcess) {
-    if (modelName && modelName !== currentModelName) {
-      const ok = sendProcessCommand(transcriberProcess, "transcriber", JSON.stringify({ cmd: "load_model", model: modelName }) + "\n");
-      if (ok) currentModelName = modelName;
-    }
-    return;
-  }
-  const script = path.join(getBackendRoot(), "transcriber_daemon.py");
-  transcriberProcess = spawn(getPythonCommand(), [script, "--model", modelName], { stdio: ["pipe", "pipe", "pipe"], env: getPythonEnv() });
-  currentModelName = modelName;
-  if (transcriberProcess.stdout) transcriberProcess.stdout.on("data", (d) => {
-    const s = d.toString();
-    transcriberStdoutBuf += s;
-    const parts = transcriberStdoutBuf.split("\n");
-    transcriberStdoutBuf = parts.pop() || "";
-    for (const line of parts) {
-      if (!line) continue;
-      try {
-        const obj = JSON.parse(line);
-        if (obj.event === "done") {
-          const outPath = obj.out;
-          const text = obj.text || "";
-          if (outPath && isChunkTranscriptPath(outPath)) {
-            pendingChunkTranscriptions = Math.max(pendingChunkTranscriptions - 1, 0);
-            if (recordingStopped && pendingChunkTranscriptions === 0 && currentSessionDir) {
-              finalizeTranscriptFromChunks(currentSessionDir);
-            }
-            continue;
-          }
-          handleTranscriptReady(outPath, text);
-        } else if (obj.event === "loaded") {
-          console.log("[transcriber] loaded", obj.model);
-        } else if (obj.event === "progress") {
-          console.log("[transcriber]", obj.msg);
-          try {
-            win == null ? void 0 : win.webContents.send("transcription-status", { state: "running", sessionDir: currentSessionDir, message: obj.msg || "transcribing" });
-          } catch (e) {
-            console.error("failed to send transcription-status running", e);
-          }
-        } else if (obj.event === "error") {
-          console.error("[transcriber error]", obj.msg);
-          try {
-            win == null ? void 0 : win.webContents.send("transcription-status", { state: "error", sessionDir: currentSessionDir, message: obj.msg || "transcription error" });
-          } catch (e) {
-            console.error("failed to send transcription-status error", e);
-          }
-        }
-      } catch (e) {
-        console.error("failed to parse transcriber stdout line", e, line);
-      }
-    }
-  });
-  else console.error("[transcriber] stdout not available");
-  if (transcriberProcess.stderr) transcriberProcess.stderr.on("data", (d) => console.error("[transcriber err]", d.toString().trim()));
-  else console.error("[transcriber] stderr not available");
-  transcriberProcess.on("error", (err) => {
-    console.error("[transcriber spawn error]", err);
-    try {
-      win == null ? void 0 : win.webContents.send("transcription-status", { state: "error", sessionDir: currentSessionDir, message: "failed to start transcriber" });
-    } catch (e) {
-      console.error("failed to send transcription-status spawn error", e);
-    }
-  });
-  transcriberProcess.on("exit", (code) => {
-    console.log("[transcriber] exited", code);
-    transcriberProcess = null;
-  });
 }
 function makeSessionDir() {
   const sessionsRoot = getSessionsRoot();
@@ -674,8 +551,6 @@ async function startBackend() {
   const ready = await ensureDependencies();
   if (!ready) return;
   recordStdoutBuf = "";
-  pendingChunkTranscriptions = 0;
-  recordingStopped = false;
   const sessionDir = makeSessionDir();
   currentSessionDir = sessionDir;
   const outWav = path.join(sessionDir, "audio.wav");
@@ -685,14 +560,8 @@ async function startBackend() {
   } catch (e) {
     console.error("failed to send session-started", e);
   }
-  startSummarizerIfNeeded(resolveSummaryModelPath());
-  const scriptPath = path.join(getBackendRoot(), "record.py");
-  const args = [scriptPath, "--out", outWav];
-  const chunkSecs = getRecordChunkSecs();
-  if (chunkSecs > 0) {
-    args.push("--chunk-secs", String(chunkSecs));
-  }
-  startTranscriberIfNeeded(currentModelName);
+  const scriptPath = path.join(getBackendRoot(), "record_and_transcribe.py");
+  const args = [scriptPath, "--out", outWav, "--model", currentModelName];
   startSummarizerIfNeeded(resolveSummaryModelPath());
   backendProcess = spawn(getPythonCommand(), args, {
     stdio: ["pipe", "pipe", "pipe"],
@@ -725,70 +594,7 @@ function stopBackend() {
     return;
   }
   backendProcess.kill("SIGTERM");
-  backendProcess = null;
   console.log("[backend] stop signal sent");
-  if (currentSessionDir) {
-    const wavPath = path.join(currentSessionDir, "audio.wav");
-    const outPath = path.join(currentSessionDir, "transcript.txt");
-    recordingStopped = true;
-    const chunkSecs = getRecordChunkSecs();
-    if (chunkSecs > 0 && transcriberProcess) {
-      return;
-    }
-    if (transcriberProcess) {
-      try {
-        try {
-          win == null ? void 0 : win.webContents.send("transcription-status", { state: "starting", sessionDir: currentSessionDir, message: "starting transcription" });
-        } catch (e) {
-          console.error("failed to send transcription-status starting", e);
-        }
-        sendProcessCommand(transcriberProcess, "transcriber", JSON.stringify({ cmd: "transcribe", wav: wavPath, out: outPath }) + "\n");
-      } catch (e) {
-        console.error("failed to send transcribe command to daemon", e);
-      }
-    } else {
-      const transScript = path.join(getBackendRoot(), "transcribe.py");
-      const model = currentModelName || "small.en";
-      try {
-        win == null ? void 0 : win.webContents.send("transcription-status", { state: "starting", sessionDir: currentSessionDir, message: "starting transcription" });
-      } catch (e) {
-        console.error("failed to send transcription-status starting", e);
-      }
-      const tproc = spawn(getPythonCommand(), [transScript, "--wav", wavPath, "--model", model, "--out", outPath], {
-        stdio: ["ignore", "pipe", "pipe"],
-        env: getPythonEnv()
-      });
-      let buf = "";
-      tproc.stdout.on("data", (data) => {
-        buf += data.toString();
-        console.log("[transcribe]", data.toString().trim());
-      });
-      tproc.stderr.on("data", (data) => {
-        console.error("[transcribe err]", data.toString().trim());
-      });
-      tproc.on("exit", (code) => {
-        console.log("[transcribe] exited", code);
-        let text = "";
-        try {
-          text = fs.readFileSync(outPath, "utf-8");
-        } catch (e) {
-          text = buf;
-        }
-        try {
-          win == null ? void 0 : win.webContents.send("transcript-ready", { sessionDir: currentSessionDir, transcriptPath: outPath, text });
-        } catch (e) {
-          console.error("failed to send transcript-ready", e);
-        }
-        try {
-          const state = code === 0 ? "done" : "error";
-          win == null ? void 0 : win.webContents.send("transcription-status", { state, sessionDir: currentSessionDir, message: code === 0 ? "transcription complete" : "transcription failed" });
-        } catch (e) {
-          console.error("failed to send transcription-status exit", e);
-        }
-        currentSessionDir = null;
-      });
-    }
-  }
 }
 function pauseBackend() {
   if (!backendProcess) {
@@ -815,8 +621,6 @@ ipcMain.on("backend-start", (_evt, opts = {}) => {
     const ready = await ensureDependencies();
     if (!ready) return;
     recordStdoutBuf = "";
-    pendingChunkTranscriptions = 0;
-    recordingStopped = false;
     const sessionDir = makeSessionDir();
     currentSessionDir = sessionDir;
     const outWav = path.join(sessionDir, "audio.wav");
@@ -826,16 +630,11 @@ ipcMain.on("backend-start", (_evt, opts = {}) => {
     } catch (e) {
       console.error("failed to send session-started", e);
     }
-    const scriptPath = path.join(getBackendRoot(), "record.py");
-    const args = [scriptPath, "--out", outWav];
+    const scriptPath = path.join(getBackendRoot(), "record_and_transcribe.py");
+    const args = [scriptPath, "--out", outWav, "--model", currentModelName];
     if (opts && typeof opts.deviceIndex === "number") {
       args.push("--device-index", String(opts.deviceIndex));
     }
-    const chunkSecs = getRecordChunkSecs();
-    if (chunkSecs > 0) {
-      args.push("--chunk-secs", String(chunkSecs));
-    }
-    startTranscriberIfNeeded(currentModelName);
     startSummarizerIfNeeded(resolveSummaryModelPath());
     backendProcess = spawn(getPythonCommand(), args, {
       stdio: ["pipe", "pipe", "pipe"],
@@ -946,14 +745,6 @@ app.on("activate", () => {
 });
 app.on("before-quit", () => {
   stopBackend();
-  if (transcriberProcess) {
-    try {
-      transcriberProcess.kill("SIGTERM");
-    } catch (e) {
-      console.error("failed to kill transcriber", e);
-    }
-    transcriberProcess = null;
-  }
   if (summarizerProcess) {
     try {
       summarizerProcess.kill("SIGTERM");

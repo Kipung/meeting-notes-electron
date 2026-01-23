@@ -21,6 +21,7 @@ def check_imports():
     emit("status", "checking python dependencies")
     try:
         import torch  # noqa: F401
+        import torchaudio  # noqa: F401
         import whisper  # noqa: F401
         import pyaudio  # noqa: F401
         import llama_cpp  # noqa: F401
