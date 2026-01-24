@@ -112,11 +112,29 @@ def summarize_with_llm(
                 resp = client(full_prompt, max_tokens=max_tokens, temperature=0.2, stream=True)
             collected = ""
             for chunk in resp:
-                delta = chunk.get("choices", [{}])[0].get("text", "")
-                if not delta:
+                chunk_text = chunk.get("choices", [{}])[0].get("text", "")
+                if not chunk_text:
                     continue
-                collected += delta
-                on_delta(delta)
+                if not collected:
+                    collected = chunk_text
+                    on_delta(chunk_text)
+                    continue
+                if chunk_text.startswith(collected):
+                    delta = chunk_text[len(collected) :]
+                    collected = chunk_text
+                elif chunk_text in collected:
+                    delta = ""
+                else:
+                    max_overlap = 0
+                    max_len = min(len(collected), len(chunk_text))
+                    for i in range(1, max_len + 1):
+                        if collected[-i:] == chunk_text[:i]:
+                            max_overlap = i
+                    delta = chunk_text[max_overlap:]
+                    if delta:
+                        collected += delta
+                if delta:
+                    on_delta(delta)
             return collected.strip()
         except Exception:
             pass
