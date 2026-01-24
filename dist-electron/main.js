@@ -1,6 +1,7 @@
 import { ipcMain, dialog, app, BrowserWindow } from "electron";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import http from "node:http";
@@ -27,6 +28,7 @@ let recordingStopped = false;
 let setupState = "idle";
 let setupPromise = null;
 let downloadedSummaryModelPath = null;
+const followUpRequests = /* @__PURE__ */ new Map();
 const DEFAULT_RECORD_CHUNK_SECS = 0;
 function getUserDataRoot() {
   return app.getPath("userData");
@@ -68,6 +70,33 @@ function setSessionsRoot(root) {
   else delete settings.sessionsRoot;
   writeSettings(settings);
   return trimmed || getDefaultSessionsRoot();
+}
+function resolveSessionDir(sessionDir) {
+  if (!sessionDir || typeof sessionDir !== "string") return null;
+  const resolved = path.resolve(sessionDir);
+  const root = path.resolve(getSessionsRoot());
+  if (resolved === root) return null;
+  if (!resolved.startsWith(root + path.sep)) return null;
+  return resolved;
+}
+function listSessionAudioPaths(sessionDir) {
+  const paths = [];
+  const mainAudio = path.join(sessionDir, "audio.wav");
+  if (fs.existsSync(mainAudio)) paths.push(mainAudio);
+  const chunksDir = path.join(sessionDir, "chunks");
+  if (fs.existsSync(chunksDir)) {
+    try {
+      const entries = fs.readdirSync(chunksDir);
+      for (const entry of entries) {
+        if (entry.toLowerCase().endsWith(".wav")) {
+          paths.push(path.join(chunksDir, entry));
+        }
+      }
+    } catch (e) {
+      console.error("failed to read chunks dir", e);
+    }
+  }
+  return paths;
 }
 function getModelsRoot() {
   return path.join(getUserDataRoot(), "models");
@@ -463,7 +492,22 @@ function startSummarizerIfNeeded(modelPath) {
       if (!line) continue;
       try {
         const obj = JSON.parse(line);
-        if (obj.event === "done") {
+        if (obj.event === "summary_start") {
+          try {
+            win == null ? void 0 : win.webContents.send("summary-stream", { sessionDir: currentSessionDir, reset: true });
+          } catch (e) {
+            console.error("failed to send summary-stream reset", e);
+          }
+        } else if (obj.event === "summary_delta") {
+          const delta = obj.text || "";
+          if (delta) {
+            try {
+              win == null ? void 0 : win.webContents.send("summary-stream", { sessionDir: currentSessionDir, delta });
+            } catch (e) {
+              console.error("failed to send summary-stream delta", e);
+            }
+          }
+        } else if (obj.event === "done") {
           const summaryOut = obj.out;
           const summaryText = obj.text || "";
           try {
@@ -475,6 +519,16 @@ function startSummarizerIfNeeded(modelPath) {
             win == null ? void 0 : win.webContents.send("summary-status", { state: "done", sessionDir: currentSessionDir, message: "summary complete" });
           } catch (e) {
             console.error("failed to send summary-status done", e);
+          }
+        } else if (obj.event === "followup_done") {
+          const requestId = obj.id;
+          const request = requestId ? followUpRequests.get(requestId) : null;
+          if (request) {
+            clearTimeout(request.timeout);
+            request.resolve({ ok: true, text: obj.text || "" });
+            followUpRequests.delete(requestId);
+          } else {
+            console.warn("[summarizer] follow-up done with no request id", obj.id);
           }
         } else if (obj.event === "loaded") {
           console.log("[summarizer] loaded", obj.model);
@@ -491,6 +545,16 @@ function startSummarizerIfNeeded(modelPath) {
             win == null ? void 0 : win.webContents.send("summary-status", { state: "error", sessionDir: currentSessionDir, message: obj.msg || "summary error" });
           } catch (e) {
             console.error("failed to send summary-status error", e);
+          }
+        } else if (obj.event === "followup_error") {
+          const requestId = obj.id;
+          const request = requestId ? followUpRequests.get(requestId) : null;
+          if (request) {
+            clearTimeout(request.timeout);
+            request.resolve({ ok: false, error: obj.msg || "follow-up error" });
+            followUpRequests.delete(requestId);
+          } else {
+            console.warn("[summarizer] follow-up error with no request id", obj.id, obj.msg);
           }
         }
       } catch (e) {
@@ -512,6 +576,13 @@ function startSummarizerIfNeeded(modelPath) {
   summarizerProcess.on("exit", (code) => {
     console.log("[summarizer] exited", code);
     summarizerProcess = null;
+    if (followUpRequests.size > 0) {
+      for (const [id, request] of followUpRequests.entries()) {
+        clearTimeout(request.timeout);
+        request.resolve({ ok: false, error: "summarizer exited before follow-up finished" });
+        followUpRequests.delete(id);
+      }
+    }
   });
 }
 function handleTranscriptReady(outPath, text) {
@@ -911,6 +982,61 @@ ipcMain.handle("choose-sessions-root", async () => {
     console.error("failed to choose sessions root", e);
     return null;
   }
+});
+ipcMain.handle("generate-followup-email", async (_evt, payload = {}) => {
+  const summary = typeof payload.summary === "string" ? payload.summary.trim() : "";
+  if (!summary) return { ok: false, error: "summary is required" };
+  const studentName = typeof payload.studentName === "string" ? payload.studentName.trim() : "";
+  const instructions = typeof payload.instructions === "string" ? payload.instructions.trim() : "";
+  const temperature = typeof payload.temperature === "number" ? payload.temperature : void 0;
+  const maxTokens = typeof payload.maxTokens === "number" ? payload.maxTokens : void 0;
+  const modelPath = await ensureSummaryModel();
+  if (!modelPath) return { ok: false, error: "summary model not found" };
+  startSummarizerIfNeeded(modelPath);
+  if (!summarizerProcess) return { ok: false, error: "summarizer not running" };
+  const requestId = randomUUID();
+  return new Promise((resolve) => {
+    const timeout = setTimeout(() => {
+      followUpRequests.delete(requestId);
+      resolve({ ok: false, error: "follow-up generation timed out" });
+    }, 9e4);
+    followUpRequests.set(requestId, { resolve, timeout });
+    const cmd = {
+      cmd: "followup_email",
+      id: requestId,
+      summary,
+      instructions
+    };
+    if (studentName) cmd.student_name = studentName;
+    if (typeof temperature === "number") cmd.temperature = temperature;
+    if (typeof maxTokens === "number") cmd.max_tokens = maxTokens;
+    const ok = sendProcessCommand(summarizerProcess, "summarizer", JSON.stringify(cmd) + "\n");
+    if (!ok) {
+      clearTimeout(timeout);
+      followUpRequests.delete(requestId);
+      resolve({ ok: false, error: "failed to start follow-up generation" });
+    }
+  });
+});
+ipcMain.handle("delete-session-audio", async (_evt, sessionDir) => {
+  const resolved = resolveSessionDir(sessionDir);
+  if (!resolved) return { ok: false, error: "invalid session directory" };
+  if (backendProcess && currentSessionDir && path.resolve(currentSessionDir) === resolved) {
+    return { ok: false, error: "cannot delete audio while recording" };
+  }
+  const audioPaths = listSessionAudioPaths(resolved);
+  if (audioPaths.length === 0) return { ok: true, deleted: [] };
+  const deleted = [];
+  for (const filePath of audioPaths) {
+    try {
+      fs.unlinkSync(filePath);
+      deleted.push(filePath);
+    } catch (e) {
+      console.error("failed to delete audio file", filePath, e);
+    }
+  }
+  const ok = deleted.length === audioPaths.length;
+  return { ok, deleted, error: ok ? void 0 : "failed to delete some audio files" };
 });
 function createWindow() {
   win = new BrowserWindow({

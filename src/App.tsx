@@ -18,6 +18,14 @@ const STEP_LABELS: Record<StepState, string> = {
   error: 'error',
 }
 
+const getTodayDateString = () => {
+  const now = new Date()
+  const year = now.getFullYear()
+  const month = String(now.getMonth() + 1).padStart(2, '0')
+  const day = String(now.getDate()).padStart(2, '0')
+  return `${year}-${month}-${day}`
+}
+
 function App() {
   const [devices, setDevices] = useState<any[]>([])
   const [selectedDevice, setSelectedDevice] = useState<number | null>(null)
@@ -40,12 +48,17 @@ function App() {
   const [summary, setSummary] = useState('')
   const [sessionDir, setSessionDir] = useState<string | null>(null)
   const [sessionsRoot, setSessionsRoot] = useState<string | null>(null)
-  const [sessionDate, setSessionDate] = useState('')
-  const [sessionModality, setSessionModality] = useState<'online' | 'in-person' | 'hybrid'>('online')
+  const [sessionDate, setSessionDate] = useState(() => getTodayDateString())
+  const [sessionModality, setSessionModality] = useState('Email')
   const [sessionSubject, setSessionSubject] = useState('')
   const [coachInitials, setCoachInitials] = useState('')
   const [studentId, setStudentId] = useState('')
   const [studentName, setStudentName] = useState('')
+  const [audioDeleteMessage, setAudioDeleteMessage] = useState('')
+  const [followUpEmail, setFollowUpEmail] = useState('')
+  const [followUpInstructions, setFollowUpInstructions] = useState('')
+  const [followUpGenerating, setFollowUpGenerating] = useState(false)
+  const [followUpStatus, setFollowUpStatus] = useState('')
 
   const getElapsedSeconds = () => {
     if (!recordingStartRef.current) return 0
@@ -76,6 +89,7 @@ function App() {
     ;(window as any).backend.onSession((_ev: any, data: any) => {
       setSessionDir(data.sessionDir || null)
       if (data.sessionsRoot) setSessionsRoot(data.sessionsRoot)
+      setAudioDeleteMessage('')
     })
 
     ;(window as any).backend.onTranscript((_ev: any, data: any) => {
@@ -102,6 +116,22 @@ function App() {
       setSummarizationState('done')
       const text = data.text || ''
       setSummary(text)
+      setFollowUpEmail('')
+      setFollowUpStatus('')
+      setFollowUpGenerating(false)
+    })
+
+    ;(window as any).backend.onSummaryStream((_ev: any, data: any) => {
+      if (!data) return
+      if (data.reset) {
+        setSummary('')
+        setFollowUpEmail('')
+        setFollowUpStatus('')
+        setFollowUpGenerating(false)
+        return
+      }
+      const delta = typeof data.delta === 'string' ? data.delta : ''
+      if (delta) setSummary((prev) => prev + delta)
     })
 
     ;(window as any).backend.onSummaryStatus((_ev: any, data: any) => {
@@ -164,6 +194,10 @@ function App() {
   const onStart = () => {
     setTranscript('')
     setSummary('')
+    setFollowUpEmail('')
+    setFollowUpStatus('')
+    setFollowUpGenerating(false)
+    setSessionDate(getTodayDateString())
     setStatus('recording')
     setStatusDetail('recording audio')
     setRecordingState('running')
@@ -175,6 +209,7 @@ function App() {
     pausedMsRef.current = 0
     setElapsedSeconds(0)
     setRunning(true)
+    setAudioDeleteMessage('')
     ;(window as any).backend.start({ deviceIndex: selectedDevice, model })
   }
 
@@ -222,6 +257,8 @@ function App() {
   }
 
   const canPause = running && (recordingState === 'running' || recordingState === 'paused')
+  const canDeleteAudio = Boolean(sessionDir) && transcriptionState === 'done' && recordingState !== 'running' && recordingState !== 'paused'
+  const followUpActionLabel = followUpGenerating ? 'Generating...' : followUpEmail ? 'Regenerate from summary' : 'Generate from summary'
   const studentInfo = [studentId ? `Student ID: ${studentId}` : '', studentName ? `Student Name: ${studentName}` : '']
     .filter(Boolean)
     .join('\n')
@@ -241,9 +278,9 @@ function App() {
     : ''
   const summaryWithMeta = summary
     ? [
+        studentInfo,
         sessionDetailsLine,
         summary,
-        studentInfo,
       ]
         .filter(Boolean)
         .join('\n\n')
@@ -285,6 +322,49 @@ function App() {
       if (nextRoot) setSessionsRoot(nextRoot)
     } catch (e) {
       console.error('chooseSessionsRoot failed', e)
+    }
+  }
+
+  const onGenerateFollowUpEmail = async () => {
+    if (!summary || followUpGenerating) return
+    setFollowUpGenerating(true)
+    setFollowUpStatus('Generating follow-up email...')
+    try {
+      const res = await (window as any).backend.generateFollowUpEmail({
+        summary,
+        studentName: studentName.trim() || undefined,
+        instructions: followUpInstructions,
+      })
+      if (res && res.ok) {
+        setFollowUpEmail(res.text || '')
+        setFollowUpStatus('')
+      } else {
+        setFollowUpStatus(res?.error || 'Failed to generate follow-up email.')
+      }
+    } catch (e) {
+      console.error('generateFollowUpEmail failed', e)
+      setFollowUpStatus('Failed to generate follow-up email.')
+    } finally {
+      setFollowUpGenerating(false)
+    }
+  }
+
+  const onDeleteAudio = async () => {
+    if (!sessionDir || !canDeleteAudio) return
+    const ok = window.confirm('Delete audio for this session? This removes audio.wav and any chunk .wav files.')
+    if (!ok) return
+    setAudioDeleteMessage('Deleting session audio...')
+    try {
+      const res = await (window as any).backend.deleteSessionAudio(sessionDir)
+      if (res && res.ok) {
+        const deletedCount = Array.isArray(res.deleted) ? res.deleted.length : 0
+        setAudioDeleteMessage(deletedCount > 0 ? 'Session audio deleted.' : 'No audio files found.')
+      } else {
+        setAudioDeleteMessage(res?.error || 'Failed to delete session audio.')
+      }
+    } catch (e) {
+      console.error('deleteSessionAudio failed', e)
+      setAudioDeleteMessage('Failed to delete session audio.')
     }
   }
 
@@ -341,29 +421,47 @@ function App() {
               Change Folder
             </button>
           </div>
+          {sessionDir ? (
+            <div style={{ marginTop: 10, display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+              <span style={{ color: '#c7c7c7' }}>Audio:</span>
+              <button
+                onClick={onDeleteAudio}
+                disabled={!canDeleteAudio}
+                style={{
+                  border: '1px solid #5a2a2a',
+                  background: '#2a1616',
+                  color: '#f1f1f1',
+                  padding: '4px 10px',
+                  borderRadius: 6,
+                  cursor: canDeleteAudio ? 'pointer' : 'not-allowed',
+                }}
+              >
+                Delete Audio
+              </button>
+              <span style={{ color: '#9b9b9b' }}>
+                {canDeleteAudio ? 'Removes audio.wav and chunk .wav files.' : 'Available after transcription is done.'}
+              </span>
+            </div>
+          ) : null}
           {setupMessage ? <div style={{ marginTop: 8, color: '#c7c7c7' }}>{setupMessage}</div> : null}
           {statusDetail ? <div style={{ marginTop: 8, color: '#c7c7c7' }}>{statusDetail}</div> : null}
+          {audioDeleteMessage ? <div style={{ marginTop: 8, color: '#c7c7c7' }}>{audioDeleteMessage}</div> : null}
         </div>
 
         <div className="details-panel" style={{ textAlign: 'left' }}>
           <div style={{ marginBottom: 6 }}>
             <div style={{ marginBottom: 6, fontWeight: 600 }}>Session details</div>
             <div className="form-row">
-              <label className="field field--date">
-                <span>Date</span>
-                <input
-                  type="date"
-                  value={sessionDate}
-                  onChange={(e) => setSessionDate(e.target.value)}
-                  style={{ width: '100%' }}
-                />
-              </label>
               <label className="field field--modality">
                 <span>Modality</span>
-                <select value={sessionModality} onChange={(e) => setSessionModality(e.target.value as 'online' | 'in-person' | 'hybrid')} style={{ width: '100%' }}>
-                  <option value="online">Online</option>
-                  <option value="in-person">In person</option>
-                  <option value="hybrid">Hybrid</option>
+                <select value={sessionModality} onChange={(e) => setSessionModality(e.target.value)} style={{ width: '100%' }}>
+                  <option value="Email">Email</option>
+                  <option value="Walk-In">Walk-In</option>
+                  <option value="Virtual Office Hour">Virtual Office Hour</option>
+                  <option value="Phone">Phone</option>
+                  <option value="Virtual Appointment">Virtual Appointment</option>
+                  <option value="Phone Appointment">Phone Appointment</option>
+                  <option value="In Person Appointment">In Person Appointment</option>
                 </select>
               </label>
               <label className="field field--subject">
@@ -516,6 +614,32 @@ function App() {
             Copy summary
           </button>
           <div style={{ whiteSpace: 'pre-wrap', background: '#151515', color: '#f1f1f1', padding: 10, minHeight: 160, border: '1px solid #2b2b2b', borderRadius: 6 }}>{summaryWithMeta || '(empty)'}</div>
+        </div>
+
+        <div className="output-panel">
+          <h3>Follow-up Email</h3>
+          <div style={{ marginBottom: 8 }}>
+            <label style={{ display: 'block', marginBottom: 6, color: '#c7c7c7' }}>Email instructions (optional)</label>
+            <textarea
+              value={followUpInstructions}
+              onChange={(e) => setFollowUpInstructions(e.target.value)}
+              placeholder="Hints: brief, bullets, omit action items; subject: ...; greeting: ...; closing: ...; signature: ..."
+              rows={3}
+              style={{ width: '100%', background: '#151515', color: '#f1f1f1', border: '1px solid #2b2b2b', borderRadius: 6, padding: 8 }}
+            />
+          </div>
+          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 8 }}>
+            <button onClick={onGenerateFollowUpEmail} disabled={!summary || followUpGenerating}>
+              {followUpActionLabel}
+            </button>
+            <button onClick={() => copyToClipboard(followUpEmail)} disabled={!followUpEmail}>
+              Copy email
+            </button>
+          </div>
+          {followUpStatus ? <div style={{ marginBottom: 8, color: '#c7c7c7' }}>{followUpStatus}</div> : null}
+          <div style={{ whiteSpace: 'pre-wrap', background: '#151515', color: '#f1f1f1', padding: 10, minHeight: 160, border: '1px solid #2b2b2b', borderRadius: 6 }}>
+            {followUpEmail || '(empty)'}
+          </div>
         </div>
       </div>
     </div>
