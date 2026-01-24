@@ -56,6 +56,26 @@ def ensure_whisper_model(model_name: str, download_root: str = None):
         sys.exit(5)
 
 
+def ensure_vad_model():
+    emit("status", "loading silero VAD model")
+    try:
+        import torch
+    except Exception as exc:
+        emit("error", f"failed to import torch: {exc}")
+        sys.exit(6)
+
+    try:
+        torch.hub.load(
+            repo_or_dir="snakers4/silero-vad",
+            model="silero_vad",
+            trust_repo=True,
+            force_reload=False,
+        )
+    except Exception as exc:
+        emit("error", f"vad model load failed: {exc}")
+        sys.exit(7)
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--whisper-model", default="small.en", help="Whisper model name")
@@ -68,6 +88,7 @@ def main():
 
     check_imports()
     ensure_whisper_model(args.whisper_model, whisper_dir)
+    ensure_vad_model()
     emit("done", "setup complete")
 
 

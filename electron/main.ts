@@ -651,19 +651,9 @@ async function startBackend() {
 
   recordStdoutBuf = ''
 
-  const sessionDir = makeSessionDir()
-  currentSessionDir = sessionDir
-  const outWav = path.join(sessionDir, 'audio.wav')
-  console.log('[backend] sessionDir=', sessionDir)
-  try {
-    win?.webContents.send('session-started', { sessionDir, sessionsRoot: getSessionsRoot() })
-  } catch (e) {
-    console.error('failed to send session-started', e)
-  }
-
   const scriptPath = path.join(getBackendRoot(), 'record_and_transcribe.py')
 
-  const args: string[] = [scriptPath, '--out', outWav, '--model', currentModelName]
+  const args: string[] = [scriptPath, '--model', currentModelName]
 
   startSummarizerIfNeeded(resolveSummaryModelPath())
 
@@ -702,22 +692,11 @@ function stopBackend() {
     return
   }
 
-  if (sendProcessCommand(backendProcess, 'recorder', 'stop\n')) {
+  if (sendProcessCommand(backendProcess, 'recorder', JSON.stringify({ cmd: 'stop' }) + '\n')) {
     console.log('[backend] stop command sent')
-    setTimeout(() => {
-      if (!backendProcess) return
-      try {
-        backendProcess.kill('SIGTERM')
-        console.log('[backend] forced stop after timeout')
-      } catch (e) {
-        console.error('[backend] failed to force stop', e)
-      }
-    }, 10000)
     return
   }
-
-  backendProcess.kill('SIGTERM')
-  console.log('[backend] stop signal sent')
+  console.error('[backend] failed to send stop command')
 }
 
 function pauseBackend() {
@@ -725,7 +704,7 @@ function pauseBackend() {
     console.log('[backend] not running')
     return
   }
-  sendProcessCommand(backendProcess, 'recorder', 'pause\n')
+  sendProcessCommand(backendProcess, 'recorder', JSON.stringify({ cmd: 'pause' }) + '\n')
 }
 
 function resumeBackend() {
@@ -733,7 +712,7 @@ function resumeBackend() {
     console.log('[backend] not running')
     return
   }
-  sendProcessCommand(backendProcess, 'recorder', 'resume\n')
+  sendProcessCommand(backendProcess, 'recorder', JSON.stringify({ cmd: 'resume' }) + '\n')
 }
 
 
@@ -741,62 +720,28 @@ ipcMain.on('backend-start', (_evt, opts: { deviceIndex?: number; model?: string 
   void (async () => {
     console.log('[ipc] backend-start', opts)
     if (opts && opts.model) currentModelName = opts.model
-    if (backendProcess) {
-      console.log('[backend] already running')
-      return
-    }
-
-    const ready = await ensureDependencies()
-    if (!ready) return
-
-    recordStdoutBuf = ''
+    await startBackend()
+    if (!backendProcess) return
 
     const sessionDir = makeSessionDir()
     currentSessionDir = sessionDir
     const outWav = path.join(sessionDir, 'audio.wav')
+    const outTranscript = path.join(sessionDir, 'transcript.txt')
     console.log('[backend] sessionDir=', sessionDir)
     try {
       win?.webContents.send('session-started', { sessionDir, sessionsRoot: getSessionsRoot() })
     } catch (e) {
       console.error('failed to send session-started', e)
     }
-
-    const scriptPath = path.join(getBackendRoot(), 'record_and_transcribe.py')
-
-    const args: string[] = [scriptPath, '--out', outWav, '--model', currentModelName]
-    if (opts && typeof opts.deviceIndex === 'number') {
-      args.push('--device-index', String(opts.deviceIndex))
+    const payload = {
+      cmd: 'start',
+      out: outWav,
+      transcript_out: outTranscript,
+      device_index: opts && typeof opts.deviceIndex === 'number' ? opts.deviceIndex : undefined,
     }
-    startSummarizerIfNeeded(resolveSummaryModelPath())
-
-    backendProcess = spawn(getPythonCommand(), args, {
-      stdio: ['pipe', 'pipe', 'pipe'],
-      env: getPythonEnv(),
-    })
-
-    if (backendProcess.stdout) backendProcess.stdout.on('data', (data) => {
-      handleRecordOutput(data)
-    })
-    else console.error('[backend] stdout not available')
-
-    if (backendProcess.stderr) backendProcess.stderr.on('data', (data) => {
-      console.error('[backend err]', data.toString().trim())
-    })
-    else console.error('[backend] stderr not available')
-
-    backendProcess.on('error', (err) => {
-      console.error('[backend spawn error]', err)
-      try {
-        win?.webContents.send('transcription-status', { state: 'error', sessionDir: currentSessionDir, message: 'failed to start recorder' })
-      } catch (e) {
-        console.error('failed to send transcription-status spawn error', e)
-      }
-    })
-
-    backendProcess.on('exit', (code) => {
-      console.log('[backend] exited with code', code)
-      backendProcess = null
-    })
+    if (!sendProcessCommand(backendProcess, 'recorder', JSON.stringify(payload) + '\n')) {
+      console.error('[backend] failed to send start command')
+    }
   })()
 })
 
@@ -898,7 +843,18 @@ app.on('activate', () => {
 
 
 app.on('before-quit', () => {
-  stopBackend()
+  if (backendProcess) {
+    sendProcessCommand(backendProcess, 'recorder', JSON.stringify({ cmd: 'shutdown' }) + '\n')
+    setTimeout(() => {
+      if (!backendProcess) return
+      try {
+        backendProcess.kill('SIGTERM')
+      } catch (e) {
+        console.error('failed to kill backend', e)
+      }
+      backendProcess = null
+    }, 3000)
+  }
   if (summarizerProcess) {
     try {
       summarizerProcess.kill('SIGTERM')
