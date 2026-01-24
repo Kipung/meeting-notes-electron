@@ -86,13 +86,13 @@ function App() {
       }
     })()
 
-    ;(window as any).backend.onSession((_ev: any, data: any) => {
+    const offSession = (window as any).backend.onSession((_ev: any, data: any) => {
       setSessionDir(data.sessionDir || null)
       if (data.sessionsRoot) setSessionsRoot(data.sessionsRoot)
       setAudioDeleteMessage('')
     })
 
-    ;(window as any).backend.onTranscript((_ev: any, data: any) => {
+    const offTranscript = (window as any).backend.onTranscript((_ev: any, data: any) => {
       setTranscript(data.text || '')
       setSessionDir(data.sessionDir || null)
       setStatus('transcript-ready')
@@ -101,7 +101,7 @@ function App() {
       setRunning(false)
     })
 
-    ;(window as any).backend.onTranscriptionStatus((_ev: any, data: any) => {
+    const offTranscriptionStatus = (window as any).backend.onTranscriptionStatus((_ev: any, data: any) => {
       const state = data.state === 'starting' || data.state === 'running' ? 'running' : data.state === 'done' ? 'done' : data.state === 'error' ? 'error' : 'idle'
       setTranscriptionState(state)
       if (state === 'running') setStatus('transcribing')
@@ -110,7 +110,7 @@ function App() {
       setStatusDetail(data.message || '')
     })
 
-    ;(window as any).backend.onSummary((_ev: any, data: any) => {
+    const offSummary = (window as any).backend.onSummary((_ev: any, data: any) => {
       setStatus('summary-ready')
       setStatusDetail('summary ready')
       setSummarizationState('done')
@@ -121,7 +121,7 @@ function App() {
       setFollowUpGenerating(false)
     })
 
-    ;(window as any).backend.onSummaryStream((_ev: any, data: any) => {
+    const offSummaryStream = (window as any).backend.onSummaryStream((_ev: any, data: any) => {
       if (!data) return
       if (data.reset) {
         setSummary('')
@@ -134,7 +134,7 @@ function App() {
       if (delta) setSummary((prev) => prev + delta)
     })
 
-    ;(window as any).backend.onSummaryStatus((_ev: any, data: any) => {
+    const offSummaryStatus = (window as any).backend.onSummaryStatus((_ev: any, data: any) => {
       const state = data.state === 'starting' || data.state === 'running' ? 'running' : data.state === 'done' ? 'done' : data.state === 'error' ? 'error' : 'idle'
       setSummarizationState(state)
       if (state === 'running') setStatus('summarizing')
@@ -143,12 +143,21 @@ function App() {
       setStatusDetail(data.message || '')
     })
 
-    ;(window as any).backend.onBootstrapStatus((_ev: any, data: any) => {
+    const offBootstrapStatus = (window as any).backend.onBootstrapStatus((_ev: any, data: any) => {
       const state = data.state === 'running' ? 'running' : data.state === 'done' ? 'done' : data.state === 'error' ? 'error' : 'idle'
       setSetupState(state)
       setSetupMessage(data.message || '')
       setSetupPercent(typeof data.percent === 'number' ? data.percent : null)
     })
+    return () => {
+      offSession()
+      offTranscript()
+      offTranscriptionStatus()
+      offSummary()
+      offSummaryStream()
+      offSummaryStatus()
+      offBootstrapStatus()
+    }
   }, [])
 
   useEffect(() => {

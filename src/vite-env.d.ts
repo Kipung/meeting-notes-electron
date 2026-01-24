@@ -17,12 +17,12 @@ interface Window {
       temperature?: number
       maxTokens?: number
     }) => Promise<{ ok: boolean; text?: string; error?: string }>
-    onSession: (cb: (ev: any, data: any) => void) => void
-    onTranscript: (cb: (ev: any, data: any) => void) => void
-    onTranscriptionStatus: (cb: (ev: any, data: any) => void) => void
-    onSummary: (cb: (ev: any, data: any) => void) => void
-    onSummaryStatus: (cb: (ev: any, data: any) => void) => void
-    onSummaryStream: (cb: (ev: any, data: any) => void) => void
-    onBootstrapStatus: (cb: (ev: any, data: any) => void) => void
+    onSession: (cb: (ev: any, data: any) => void) => () => void
+    onTranscript: (cb: (ev: any, data: any) => void) => () => void
+    onTranscriptionStatus: (cb: (ev: any, data: any) => void) => () => void
+    onSummary: (cb: (ev: any, data: any) => void) => () => void
+    onSummaryStatus: (cb: (ev: any, data: any) => void) => () => void
+    onSummaryStream: (cb: (ev: any, data: any) => void) => () => void
+    onBootstrapStatus: (cb: (ev: any, data: any) => void) => () => void
   }
 }
