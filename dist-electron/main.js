@@ -24,6 +24,7 @@ let recordStdoutBuf = "";
 let setupState = "idle";
 let setupPromise = null;
 let downloadedSummaryModelPath = null;
+const followUpRequests = /* @__PURE__ */ new Map();
 function getUserDataRoot() {
   return app.getPath("userData");
 }
@@ -594,6 +595,18 @@ function handleRecordOutput(data) {
     if (!line) continue;
     try {
       const obj = JSON.parse(line);
+      if (obj.event === "partial") {
+        try {
+          win == null ? void 0 : win.webContents.send("transcript-partial", {
+            sessionDir: currentSessionDir,
+            text: obj.text || "",
+            fullText: obj.full_text || obj.fullText || ""
+          });
+        } catch (e) {
+          console.error("failed to send transcript-partial", e);
+        }
+        continue;
+      }
       if (obj.event === "done" && obj.out) {
         const outPath = obj.out;
         const text = obj.text || "";

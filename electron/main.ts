@@ -684,6 +684,18 @@ function handleRecordOutput(data: Buffer) {
     if (!line) continue
     try {
       const obj = JSON.parse(line)
+      if (obj.event === 'partial') {
+        try {
+          win?.webContents.send('transcript-partial', {
+            sessionDir: currentSessionDir,
+            text: obj.text || '',
+            fullText: obj.full_text || obj.fullText || '',
+          })
+        } catch (e) {
+          console.error('failed to send transcript-partial', e)
+        }
+        continue
+      }
       if (obj.event === 'done' && obj.out) {
         const outPath = obj.out
         const text = obj.text || ''

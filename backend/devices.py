@@ -5,7 +5,10 @@ List available PyAudio devices in JSON format.
 import json
 import sys
 try:
-    import pyaudio
+    if sys.platform == 'win32':
+        import pyaudiowpatch as pyaudio
+    else:
+        import pyaudio
 except Exception as e:
     print(json.dumps({'error': str(e)}))
     sys.exit(1)

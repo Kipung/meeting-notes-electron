@@ -16,6 +16,7 @@ electron.contextBridge.exposeInMainWorld("backend", {
   generateFollowUpEmail: (payload) => electron.ipcRenderer.invoke("generate-followup-email", payload),
   onSession: (cb) => onChannel("session-started", cb),
   onTranscript: (cb) => onChannel("transcript-ready", cb),
+  onTranscriptPartial: (cb) => onChannel("transcript-partial", cb),
   onTranscriptionStatus: (cb) => onChannel("transcription-status", cb),
   onSummary: (cb) => onChannel("summary-ready", cb),
   onSummaryStatus: (cb) => onChannel("summary-status", cb),

@@ -15,7 +15,6 @@ Emits JSON on stdout:
   {"event":"error","msg":"..."}
 """
 
-import argparse
 import collections
 import json
 import os
@@ -27,9 +26,22 @@ import time
 import wave
 
 import numpy as np
-import pyaudio
+if sys.platform == "win32":
+    import pyaudiowpatch as pyaudio
+else:
+    import pyaudio
 import torch
 import whisper
+
+
+TARGET_RATE = 16000
+TARGET_CHANNELS = 1
+TARGET_CHUNK = 512
+VAD_THRESHOLD = 0.5
+VAD_MIN_SILENCE_MS = 600
+VAD_MIN_SPEECH_MS = 200
+VAD_PRE_PAD_MS = 200
+VAD_POST_PAD_MS = 200
 
 
 class SessionState:
@@ -90,22 +102,39 @@ def _vad_prob(vad_model, audio_float: np.ndarray, sample_rate: int) -> float:
         return float(prob)
 
 
-def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--model", default="small.en", help="Whisper model name")
-    parser.add_argument("--rate", type=int, default=16000)
-    parser.add_argument("--channels", type=int, default=1)
-    parser.add_argument("--chunk", type=int, default=512)
-    parser.add_argument("--vad-threshold", type=float, default=0.5)
-    parser.add_argument("--vad-min-silence-ms", type=int, default=600)
-    parser.add_argument("--vad-min-speech-ms", type=int, default=200)
-    parser.add_argument("--vad-pre-pad-ms", type=int, default=200)
-    parser.add_argument("--vad-post-pad-ms", type=int, default=200)
-    args = parser.parse_args()
+def _downmix_to_mono(audio_i16: np.ndarray, channels: int) -> np.ndarray:
+    if channels <= 1 or audio_i16.size == 0:
+        return audio_i16
+    remainder = audio_i16.size % channels
+    if remainder:
+        audio_i16 = audio_i16[: audio_i16.size - remainder]
+    frames = audio_i16.reshape(-1, channels).astype(np.float32)
+    return np.rint(frames.mean(axis=1)).astype(np.int16)
 
-    if args.channels != 1:
-        print("[record] only mono input is supported for VAD, forcing channels=1", file=sys.stderr, flush=True)
-        args.channels = 1
+
+def _resample_linear(audio_i16: np.ndarray, src_rate: int, dst_rate: int) -> np.ndarray:
+    if src_rate == dst_rate or audio_i16.size == 0:
+        return audio_i16
+    src_len = audio_i16.size
+    dst_len = int(round(src_len * float(dst_rate) / float(src_rate)))
+    if dst_len <= 1:
+        return audio_i16[:1]
+    src_x = np.arange(src_len, dtype=np.float32)
+    dst_x = np.linspace(0, src_len - 1, num=dst_len, dtype=np.float32)
+    resampled = np.interp(dst_x, src_x, audio_i16.astype(np.float32))
+    return np.rint(resampled).astype(np.int16)
+
+
+def main():
+    model_name = "small.en"
+    if "--model" in sys.argv:
+        idx = sys.argv.index("--model")
+        if idx + 1 < len(sys.argv):
+            model_name = sys.argv[idx + 1]
+    pa = pyaudio.PyAudio()
+    capture_channels = TARGET_CHANNELS
+    capture_rate = TARGET_RATE
+    input_chunk = TARGET_CHUNK
 
     vad_model = _vad_load()
     if vad_model is None:
@@ -115,22 +144,20 @@ def main():
         vad_model.reset_states()
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    print(f"[transcribe] loading model {args.model} on {device}", flush=True)
+    print(f"[transcribe] loading model {model_name} on {device}", flush=True)
     try:
         download_root = os.environ.get("WHISPER_ROOT")
-        whisper_model = whisper.load_model(args.model, device=device, download_root=download_root)
+        whisper_model = whisper.load_model(model_name, device=device, download_root=download_root)
     except Exception as e:
         print(f"[transcribe] failed to load model: {e}", file=sys.stderr, flush=True)
         sys.exit(3)
 
-    pa = pyaudio.PyAudio()
-
-    chunk_ms = (args.chunk / float(args.rate)) * 1000.0
-    pre_pad_frames = max(0, int(args.vad_pre_pad_ms / chunk_ms)) if chunk_ms > 0 else 0
-    post_pad_frames = max(0, int(args.vad_post_pad_ms / chunk_ms)) if chunk_ms > 0 else 0
-    min_silence_frames = max(1, int(args.vad_min_silence_ms / chunk_ms)) if chunk_ms > 0 else 1
-    min_speech_frames = max(1, int(args.vad_min_speech_ms / chunk_ms)) if chunk_ms > 0 else 1
-    min_utterance_samples = int((args.vad_min_speech_ms / 1000.0) * args.rate)
+    chunk_ms = (TARGET_CHUNK / float(TARGET_RATE)) * 1000.0
+    pre_pad_frames = max(0, int(VAD_PRE_PAD_MS / chunk_ms)) if chunk_ms > 0 else 0
+    post_pad_frames = max(0, int(VAD_POST_PAD_MS / chunk_ms)) if chunk_ms > 0 else 0
+    min_silence_frames = max(1, int(VAD_MIN_SILENCE_MS / chunk_ms)) if chunk_ms > 0 else 1
+    min_speech_frames = max(1, int(VAD_MIN_SPEECH_MS / chunk_ms)) if chunk_ms > 0 else 1
+    min_utterance_samples = int((VAD_MIN_SPEECH_MS / 1000.0) * TARGET_RATE)
 
     session_lock = threading.Lock()
     current_session = {"state": None}
@@ -140,30 +167,46 @@ def main():
         print(json.dumps(obj), flush=True)
 
     def start_session(out_path: str, transcript_path: str, device_index):
+        nonlocal capture_channels, capture_rate, input_chunk
+        device_info = pa.get_device_info_by_index(device_index) if device_index is not None else pa.get_default_input_device_info()
+        capture_rate = int(device_info.get("defaultSampleRate", TARGET_RATE))
+        min_chunk = int(np.ceil(capture_rate / 31.25))
+        input_chunk = max(min_chunk, int(np.ceil(capture_rate * (TARGET_CHUNK / float(TARGET_RATE)))))
+        capture_channels = int(device_info.get("maxInputChannels", TARGET_CHANNELS)) or TARGET_CHANNELS
         with session_lock:
             if current_session["state"] is not None:
                 send({"event": "error", "msg": "session already running"})
                 return
             os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
+
             stream_kwargs = dict(
                 format=pyaudio.paInt16,
-                channels=args.channels,
-                rate=args.rate,
+                channels=capture_channels,
+                rate=capture_rate,
                 input=True,
-                frames_per_buffer=args.chunk,
+                frames_per_buffer=input_chunk,
             )
             if device_index is not None:
                 stream_kwargs["input_device_index"] = device_index
             try:
                 stream = pa.open(**stream_kwargs)
             except Exception as e:
-                send({"event": "error", "msg": f"failed to open input stream: {e}"})
-                return
+                if capture_channels > 1:
+                    try:
+                        stream_kwargs["channels"] = 1
+                        stream = pa.open(**stream_kwargs)
+                        capture_channels = 1
+                    except Exception:
+                        send({"event": "error", "msg": f"failed to open input stream: {e}"})
+                        return
+                else:
+                    send({"event": "error", "msg": f"failed to open input stream: {e}"})
+                    return
             sample_width = pa.get_sample_size(pyaudio.paInt16)
             wf = wave.open(out_path, "wb")
-            wf.setnchannels(args.channels)
+            wf.setnchannels(TARGET_CHANNELS)
             wf.setsampwidth(sample_width)
-            wf.setframerate(args.rate)
+            wf.setframerate(TARGET_RATE)
             state = SessionState(out_path, transcript_path, stream, wf)
             state.pre_buffer = collections.deque(maxlen=pre_pad_frames or 1)
             if hasattr(vad_model, "reset_states"):
@@ -183,6 +226,8 @@ def main():
                         if text:
                             with state.transcript_lock:
                                 state.transcript_parts.append(text)
+                                full_text = "\n".join([t for t in state.transcript_parts if t])
+                            send({"event": "partial", "text": text, "full_text": full_text})
                     except Exception as e:
                         print(f"[transcribe] utterance error: {e}", file=sys.stderr, flush=True)
                     finally:
@@ -253,15 +298,18 @@ def main():
                     except Exception:
                         pass
 
-                data = state.stream.read(args.chunk, exception_on_overflow=False)
-                state.wf.writeframes(data)
-
+                data = state.stream.read(input_chunk, exception_on_overflow=False)
                 audio_i16 = np.frombuffer(data, dtype=np.int16)
+                audio_i16 = _downmix_to_mono(audio_i16, capture_channels)
+                audio_i16 = _resample_linear(audio_i16, capture_rate, TARGET_RATE)
+                if audio_i16.size:
+                    state.wf.writeframes(audio_i16.tobytes())
+
                 if audio_i16.size == 0:
                     continue
                 audio_f32 = audio_i16.astype(np.float32) / 32768.0
-                speech_prob = _vad_prob(vad_model, audio_f32, args.rate)
-                is_speech = speech_prob >= args.vad_threshold
+                speech_prob = _vad_prob(vad_model, audio_f32, TARGET_RATE)
+                is_speech = speech_prob >= VAD_THRESHOLD
 
                 if not state.speaking:
                     state.pre_buffer.append(audio_i16)
@@ -355,6 +403,7 @@ def main():
             out_path = payload.get("out")
             transcript_path = payload.get("transcript_out")
             device_index = payload.get("device_index")
+            print(f"[record] start command received: out={out_path}, transcript_out={transcript_path}, device_index={device_index}", flush=True)
             if not out_path:
                 send({"event": "error", "msg": "missing out path"})
                 return

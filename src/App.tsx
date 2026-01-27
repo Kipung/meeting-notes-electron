@@ -101,6 +101,12 @@ function App() {
       setRunning(false)
     })
 
+    const offTranscriptPartial = (window as any).backend.onTranscriptPartial((_ev: any, data: any) => {
+      const next = data.fullText || data.text || ''
+      if (next) setTranscript(next)
+      if (data.sessionDir) setSessionDir(data.sessionDir)
+    })
+
     const offTranscriptionStatus = (window as any).backend.onTranscriptionStatus((_ev: any, data: any) => {
       const state = data.state === 'starting' || data.state === 'running' ? 'running' : data.state === 'done' ? 'done' : data.state === 'error' ? 'error' : 'idle'
       setTranscriptionState(state)
@@ -152,6 +158,7 @@ function App() {
     return () => {
       offSession()
       offTranscript()
+      offTranscriptPartial()
       offTranscriptionStatus()
       offSummary()
       offSummaryStream()

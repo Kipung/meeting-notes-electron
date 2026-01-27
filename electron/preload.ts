@@ -18,6 +18,7 @@ contextBridge.exposeInMainWorld('backend', {
     ipcRenderer.invoke('generate-followup-email', payload),
   onSession: (cb: (ev: any, data: any) => void) => onChannel('session-started', cb),
   onTranscript: (cb: (ev: any, data: any) => void) => onChannel('transcript-ready', cb),
+  onTranscriptPartial: (cb: (ev: any, data: any) => void) => onChannel('transcript-partial', cb),
   onTranscriptionStatus: (cb: (ev: any, data: any) => void) => onChannel('transcription-status', cb),
   onSummary: (cb: (ev: any, data: any) => void) => onChannel('summary-ready', cb),
   onSummaryStatus: (cb: (ev: any, data: any) => void) => onChannel('summary-status', cb),
