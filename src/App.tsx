@@ -28,7 +28,9 @@ const getTodayDateString = () => {
 
 function App() {
   const [devices, setDevices] = useState<any[]>([])
+  const [loopbackDevices, setLoopbackDevices] = useState<any[]>([])
   const [selectedDevice, setSelectedDevice] = useState<number | null>(null)
+  const [selectedLoopback, setSelectedLoopback] = useState<number | null>(null)
   const [model, setModel] = useState<string>('small.en')
   const [running, setRunning] = useState(false)
   const [status, setStatus] = useState('idle')
@@ -59,6 +61,7 @@ function App() {
   const [followUpInstructions, setFollowUpInstructions] = useState('')
   const [followUpGenerating, setFollowUpGenerating] = useState(false)
   const [followUpStatus, setFollowUpStatus] = useState('')
+  const isWindows = /Windows/.test(navigator.userAgent)
 
   const getElapsedSeconds = () => {
     if (!recordingStartRef.current) return 0
@@ -71,7 +74,12 @@ function App() {
     ;(async () => {
       try {
         const res = await (window as any).backend.listDevices()
-        if (res && res.devices) setDevices(res.devices)
+        if (res && res.devices) {
+          const allDevices = res.devices
+          const loopbacks = allDevices.filter((d: any) => d && d.isLoopback)
+          setDevices(allDevices.filter((d: any) => !loopbacks.includes(d)))
+          setLoopbackDevices(loopbacks)
+        }
       } catch (e) {
         console.error('listDevices failed', e)
       }
@@ -226,7 +234,7 @@ function App() {
     setElapsedSeconds(0)
     setRunning(true)
     setAudioDeleteMessage('')
-    ;(window as any).backend.start({ deviceIndex: selectedDevice, model })
+    ;(window as any).backend.start({ deviceIndex: selectedDevice, loopbackDeviceIndex: selectedLoopback, model })
   }
 
   const onStop = () => {
@@ -536,6 +544,26 @@ function App() {
               ))}
             </select>
           </div>
+
+          {isWindows ? (
+            loopbackDevices.length > 0 ? (
+              <div className="form-inline" style={{ marginBottom: 6 }}>
+                <label>System audio (WASAPI loopback): </label>
+                <select className="form-inline__control" value={selectedLoopback ?? ''} onChange={(e) => setSelectedLoopback(e.target.value === '' ? null : Number(e.target.value))}>
+                  <option value="">None</option>
+                  {loopbackDevices.map((d) => (
+                    <option key={d.index} value={d.index}>
+                      {d.index}: {d.name} (in:{d.maxInputChannels})
+                    </option>
+                  ))}
+                </select>
+              </div>
+            ) : (
+              <div style={{ marginBottom: 6, color: '#c7c7c7' }}>
+                System audio (WASAPI loopback): no loopback devices found.
+              </div>
+            )
+          ) : null}
 
           <div className="form-inline" style={{ marginBottom: 6 }}>
             <label>Model: </label>

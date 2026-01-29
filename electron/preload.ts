@@ -6,7 +6,7 @@ const onChannel = (channel: string, cb: (ev: any, data: any) => void) => {
 }
 
 contextBridge.exposeInMainWorld('backend', {
-  start: (opts?: { deviceIndex?: number; model?: string }) => ipcRenderer.send('backend-start', opts || {}),
+  start: (opts?: { deviceIndex?: number; loopbackDeviceIndex?: number; model?: string }) => ipcRenderer.send('backend-start', opts || {}),
   stop: () => ipcRenderer.send('backend-stop'),
   pause: () => ipcRenderer.send('backend-pause'),
   resume: () => ipcRenderer.send('backend-resume'),

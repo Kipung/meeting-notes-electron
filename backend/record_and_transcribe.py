@@ -3,7 +3,7 @@
 Persistent recorder with Silero VAD + Whisper transcription.
 
 Protocol (stdin JSON lines or plain commands):
-  {"cmd":"start","out":"/path/audio.wav","transcript_out":"/path/transcript.txt","device_index":1}
+  {"cmd":"start","out":"/path/audio.wav","transcript_out":"/path/transcript.txt","device_index":1,"loopback_device_index":2}
   {"cmd":"stop"}
   {"cmd":"pause"}
   {"cmd":"resume"}
@@ -49,6 +49,13 @@ class SessionState:
         self.out_path = out_path
         self.transcript_path = transcript_path
         self.stream = stream
+        self.loopback_stream = None
+        self.mic_channels = TARGET_CHANNELS
+        self.loopback_channels = TARGET_CHANNELS
+        self.mic_rate = TARGET_RATE
+        self.loopback_rate = TARGET_RATE
+        self.mic_chunk = TARGET_CHUNK
+        self.loopback_chunk = TARGET_CHUNK
         self.wf = wf
         self.pre_buffer = collections.deque()
         self.silence_buffer = []
@@ -125,6 +132,37 @@ def _resample_linear(audio_i16: np.ndarray, src_rate: int, dst_rate: int) -> np.
     return np.rint(resampled).astype(np.int16)
 
 
+def _resample_to_length(audio_i16: np.ndarray, target_len: int) -> np.ndarray:
+    if audio_i16.size == 0 or target_len <= 0:
+        return np.array([], dtype=np.int16)
+    if audio_i16.size == target_len:
+        return audio_i16
+    if target_len == 1:
+        return audio_i16[:1]
+    src_len = audio_i16.size
+    src_x = np.arange(src_len, dtype=np.float32)
+    dst_x = np.linspace(0, src_len - 1, num=target_len, dtype=np.float32)
+    resampled = np.interp(dst_x, src_x, audio_i16.astype(np.float32))
+    return np.rint(resampled).astype(np.int16)
+
+
+def _mix_audio(mic_i16: np.ndarray, loop_i16: np.ndarray) -> np.ndarray:
+    if mic_i16.size == 0 and loop_i16.size == 0:
+        return mic_i16
+    if mic_i16.size == 0:
+        return loop_i16
+    if loop_i16.size == 0:
+        return mic_i16
+    length = min(mic_i16.size, loop_i16.size)
+    if length <= 0:
+        return mic_i16
+    mic_f = mic_i16[:length].astype(np.float32)
+    loop_f = loop_i16[:length].astype(np.float32)
+    mixed = 0.5 * (mic_f + loop_f)
+    mixed = np.clip(mixed, -32768, 32767)
+    return np.rint(mixed).astype(np.int16)
+
+
 def main():
     model_name = "small.en"
     if "--model" in sys.argv:
@@ -166,7 +204,7 @@ def main():
     def send(obj):
         print(json.dumps(obj), flush=True)
 
-    def start_session(out_path: str, transcript_path: str, device_index):
+    def start_session(out_path: str, transcript_path: str, device_index, loopback_device_index):
         nonlocal capture_channels, capture_rate, input_chunk
         device_info = pa.get_device_info_by_index(device_index) if device_index is not None else pa.get_default_input_device_info()
         capture_rate = int(device_info.get("defaultSampleRate", TARGET_RATE))
@@ -202,12 +240,56 @@ def main():
                 else:
                     send({"event": "error", "msg": f"failed to open input stream: {e}"})
                     return
+            loopback_stream = None
+            loopback_rate = TARGET_RATE
+            loopback_channels = TARGET_CHANNELS
+            loopback_chunk = TARGET_CHUNK
+            if loopback_device_index is not None:
+                try:
+                    loopback_info = pa.get_device_info_by_index(loopback_device_index)
+                except Exception as e:
+                    send({"event": "error", "msg": f"failed to get loopback device info: {e}"})
+                    try:
+                        stream.stop_stream()
+                        stream.close()
+                    except Exception:
+                        pass
+                    return
+                loopback_rate = int(loopback_info.get("defaultSampleRate", TARGET_RATE))
+                loopback_channels = int(loopback_info.get("maxInputChannels", TARGET_CHANNELS)) or TARGET_CHANNELS
+                loopback_min_chunk = int(np.ceil(loopback_rate / 31.25))
+                loopback_chunk = max(loopback_min_chunk, int(np.ceil(loopback_rate * (TARGET_CHUNK / float(TARGET_RATE)))))
+                loopback_kwargs = dict(
+                    format=pyaudio.paInt16,
+                    channels=loopback_channels,
+                    rate=loopback_rate,
+                    input=True,
+                    frames_per_buffer=loopback_chunk,
+                    input_device_index=loopback_device_index,
+                )
+                try:
+                    loopback_stream = pa.open(**loopback_kwargs)
+                except Exception as e:
+                    send({"event": "error", "msg": f"failed to open loopback stream: {e}"})
+                    try:
+                        stream.stop_stream()
+                        stream.close()
+                    except Exception:
+                        pass
+                    return
             sample_width = pa.get_sample_size(pyaudio.paInt16)
             wf = wave.open(out_path, "wb")
             wf.setnchannels(TARGET_CHANNELS)
             wf.setsampwidth(sample_width)
             wf.setframerate(TARGET_RATE)
             state = SessionState(out_path, transcript_path, stream, wf)
+            state.loopback_stream = loopback_stream
+            state.mic_channels = capture_channels
+            state.loopback_channels = loopback_channels
+            state.mic_rate = capture_rate
+            state.loopback_rate = loopback_rate
+            state.mic_chunk = input_chunk
+            state.loopback_chunk = loopback_chunk
             state.pre_buffer = collections.deque(maxlen=pre_pad_frames or 1)
             if hasattr(vad_model, "reset_states"):
                 vad_model.reset_states()
@@ -282,6 +364,12 @@ def main():
                             state.stream.stop_stream()
                     except Exception:
                         pass
+                    if state.loopback_stream is not None:
+                        try:
+                            if state.loopback_stream.is_active():
+                                state.loopback_stream.stop_stream()
+                        except Exception:
+                            pass
                     if hasattr(vad_model, "reset_states"):
                         vad_model.reset_states()
                     state.pre_buffer.clear()
@@ -297,11 +385,37 @@ def main():
                             state.stream.start_stream()
                     except Exception:
                         pass
+                    if state.loopback_stream is not None:
+                        try:
+                            if not state.loopback_stream.is_active():
+                                state.loopback_stream.start_stream()
+                        except Exception:
+                            pass
 
-                data = state.stream.read(input_chunk, exception_on_overflow=False)
-                audio_i16 = np.frombuffer(data, dtype=np.int16)
-                audio_i16 = _downmix_to_mono(audio_i16, capture_channels)
-                audio_i16 = _resample_linear(audio_i16, capture_rate, TARGET_RATE)
+                mic_data = state.stream.read(state.mic_chunk, exception_on_overflow=False)
+                mic_i16 = np.frombuffer(mic_data, dtype=np.int16)
+                mic_i16 = _downmix_to_mono(mic_i16, state.mic_channels)
+                mic_i16 = _resample_linear(mic_i16, state.mic_rate, TARGET_RATE)
+
+                loop_i16 = np.array([], dtype=np.int16)
+                if state.loopback_stream is not None:
+                    try:
+                        available = state.loopback_stream.get_read_available()
+                    except Exception:
+                        available = state.loopback_chunk
+                    if available > 0:
+                        try:
+                            frames = min(available, state.loopback_chunk)
+                            loop_data = state.loopback_stream.read(frames, exception_on_overflow=False)
+                            loop_i16 = np.frombuffer(loop_data, dtype=np.int16)
+                            loop_i16 = _downmix_to_mono(loop_i16, state.loopback_channels)
+                            loop_i16 = _resample_linear(loop_i16, state.loopback_rate, TARGET_RATE)
+                            if mic_i16.size > 0 and loop_i16.size > 0 and loop_i16.size != mic_i16.size:
+                                loop_i16 = _resample_to_length(loop_i16, mic_i16.size)
+                        except Exception:
+                            loop_i16 = np.array([], dtype=np.int16)
+
+                audio_i16 = _mix_audio(mic_i16, loop_i16)
                 if audio_i16.size:
                     state.wf.writeframes(audio_i16.tobytes())
 
@@ -351,6 +465,12 @@ def main():
                 state.stream.close()
             except Exception:
                 pass
+            if state.loopback_stream is not None:
+                try:
+                    state.loopback_stream.stop_stream()
+                    state.loopback_stream.close()
+                except Exception:
+                    pass
             try:
                 state.wf.close()
             except Exception:
@@ -403,13 +523,18 @@ def main():
             out_path = payload.get("out")
             transcript_path = payload.get("transcript_out")
             device_index = payload.get("device_index")
-            print(f"[record] start command received: out={out_path}, transcript_out={transcript_path}, device_index={device_index}", flush=True)
+            loopback_device_index = payload.get("loopback_device_index")
+            print(
+                f"[record] start command received: out={out_path}, transcript_out={transcript_path}, device_index={device_index}, loopback_device_index={loopback_device_index}",
+                flush=True,
+            )
             if not out_path:
                 send({"event": "error", "msg": "missing out path"})
                 return
             if not transcript_path:
                 transcript_path = os.path.join(os.path.dirname(out_path), "transcript.txt")
-            start_session(out_path, transcript_path, device_index if isinstance(device_index, int) else None)
+            loopback_value = loopback_device_index if isinstance(loopback_device_index, int) else None
+            start_session(out_path, transcript_path, device_index if isinstance(device_index, int) else None, loopback_value)
         elif cmd == "stop":
             stop_session()
         elif cmd == "pause":

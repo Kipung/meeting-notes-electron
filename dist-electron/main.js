@@ -707,7 +707,8 @@ ipcMain.on("backend-start", (_evt, opts = {}) => {
       cmd: "start",
       out: outWav,
       transcript_out: outTranscript,
-      device_index: opts && typeof opts.deviceIndex === "number" ? opts.deviceIndex : void 0
+      device_index: opts && typeof opts.deviceIndex === "number" ? opts.deviceIndex : void 0,
+      loopback_device_index: opts && typeof opts.loopbackDeviceIndex === "number" ? opts.loopbackDeviceIndex : void 0
     };
     if (!sendProcessCommand(backendProcess, "recorder", JSON.stringify(payload) + "\n")) {
       console.error("[backend] failed to send start command");

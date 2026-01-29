@@ -802,7 +802,7 @@ function resumeBackend() {
 }
 
 
-ipcMain.on('backend-start', (_evt, opts: { deviceIndex?: number; model?: string } = {}) => {
+ipcMain.on('backend-start', (_evt, opts: { deviceIndex?: number; loopbackDeviceIndex?: number; model?: string } = {}) => {
   void (async () => {
     console.log('[ipc] backend-start', opts)
     if (opts && opts.model) currentModelName = opts.model
@@ -824,6 +824,7 @@ ipcMain.on('backend-start', (_evt, opts: { deviceIndex?: number; model?: string 
       out: outWav,
       transcript_out: outTranscript,
       device_index: opts && typeof opts.deviceIndex === 'number' ? opts.deviceIndex : undefined,
+      loopback_device_index: opts && typeof opts.loopbackDeviceIndex === 'number' ? opts.loopbackDeviceIndex : undefined,
     }
     if (!sendProcessCommand(backendProcess, 'recorder', JSON.stringify(payload) + '\n')) {
       console.error('[backend] failed to send start command')
