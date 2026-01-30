@@ -41,6 +41,20 @@ let setupState: 'idle' | 'running' | 'done' | 'error' = 'idle'
 let setupPromise: Promise<boolean> | null = null
 let downloadedSummaryModelPath: string | null = null
 const followUpRequests = new Map<string, { resolve: (value: any) => void; timeout: NodeJS.Timeout }>()
+const CHUNK_WORD_THRESHOLD = 600
+type ChunkTask = { id: number; text: string; sessionDir: string | null }
+
+let chunkQueue: ChunkTask[] = []
+let chunkProcessing = false
+let nextChunkId = 0
+let chunkSummaries = new Map<number, string>()
+let lastTranscriptOffset = 0
+let transcriptBuffer = ''
+let chunkSummariesEnabled = false
+let finalSummaryPending: string | null = null
+let finalSummaryRunning = false
+let chunkSummariesSession: string | null = null
+let pendingFinalSummarySession: string | null = null
 
 type AppSettings = {
   sessionsRoot?: string
@@ -207,9 +221,175 @@ function getPythonEnv(): NodeJS.ProcessEnv {
       env.DYLD_LIBRARY_PATH = [libDir, env.DYLD_LIBRARY_PATH || ''].filter(Boolean).join(path.delimiter)
     }
   }
+  env.GGML_LOG_LEVEL = env.GGML_LOG_LEVEL || '0'
+  env.LLAMA_CPP_LOG_LEVEL = env.LLAMA_CPP_LOG_LEVEL || '0'
+  env.TORCH_CPP_LOG_LEVEL = env.TORCH_CPP_LOG_LEVEL || '0'
   return env
 }
 
+function countWords(text: string): number {
+  const trimmed = text.trim()
+  if (!trimmed) return 0
+  return trimmed.split(/\s+/).filter(Boolean).length
+}
+
+function resetChunkSummariesState(): void {
+  chunkQueue = []
+  chunkProcessing = false
+  nextChunkId = 0
+  chunkSummaries = new Map()
+  lastTranscriptOffset = 0
+  transcriptBuffer = ''
+  chunkSummariesEnabled = true
+  chunkSummariesSession = null
+  finalSummaryPending = null
+  finalSummaryRunning = false
+  pendingFinalSummarySession = null
+}
+
+function queueChunkSummarization(text: string): void {
+  if (!chunkSummariesEnabled || !summarizerProcess) return
+  const chunkText = text.trim()
+  if (!chunkText) return
+  chunkQueue.push({ id: nextChunkId++, text: chunkText, sessionDir: currentSessionDir })
+  processChunkQueue()
+}
+
+function processChunkQueue(): void {
+  if (chunkProcessing || !summarizerProcess || chunkQueue.length === 0) return
+  const task = chunkQueue.shift()!
+  chunkProcessing = true
+  const payload = {
+    cmd: 'summarize',
+    text: task.text,
+    out: null,
+    chunk_words: CHUNK_WORD_THRESHOLD,
+    context: { type: 'chunk', id: task.id, sessionDir: task.sessionDir },
+  }
+  const ok = sendProcessCommand(summarizerProcess, 'summarizer', JSON.stringify(payload) + '\n')
+  if (!ok) {
+    chunkProcessing = false
+    chunkQueue.unshift(task)
+    console.error('[summarizer chunk] failed to send chunk summarization command')
+    maybeStartPendingFinalSummary()
+  }
+}
+
+function processTranscriptPartialText(fullText: string): void {
+  if (!chunkSummariesEnabled) return
+  const text = fullText || ''
+  transcriptBuffer = text
+  const unprocessed = transcriptBuffer.slice(lastTranscriptOffset)
+  if (!unprocessed.trim()) return
+  if (countWords(unprocessed) >= CHUNK_WORD_THRESHOLD) {
+    queueChunkSummarization(unprocessed)
+    lastTranscriptOffset = transcriptBuffer.length
+  }
+}
+
+function maybeStartPendingFinalSummary(): void {
+  if (!finalSummaryPending) return
+  if (chunkProcessing || chunkQueue.length > 0) return
+  const text = finalSummaryPending
+  finalSummaryPending = null
+  startFinalSummary(text)
+}
+
+function requestFinalSummary(fullText: string): void {
+  if (!currentSessionDir) {
+    console.error('cannot request final summary without a session directory')
+    return
+  }
+  finalSummaryPending = fullText
+  chunkSummariesEnabled = false
+  pendingFinalSummarySession = currentSessionDir
+  maybeStartPendingFinalSummary()
+}
+
+function startFinalSummary(fullText: string): void {
+  if (!summarizerProcess || finalSummaryRunning) return
+  finalSummaryRunning = true
+  const orderedSummaries = Array.from(chunkSummaries.entries())
+    .sort((a, b) => a[0] - b[0])
+    .map(([, summary]) => summary)
+    .filter(Boolean)
+  const leftoverStart = Math.min(lastTranscriptOffset, fullText.length)
+  const leftover = fullText.slice(leftoverStart).trim()
+  const segments: string[] = []
+  if (orderedSummaries.length > 0) {
+    segments.push(`Previous chunk summaries:\n${orderedSummaries.join('\n\n')}`)
+  }
+  if (leftover) {
+    segments.push(`Remaining transcript:\n${leftover}`)
+  }
+  const inputText = segments.length > 0 ? segments.join('\n\n') : fullText
+  const summarySessionDir = pendingFinalSummarySession || currentSessionDir
+  if (!summarySessionDir) {
+    console.error('final summary requested with no session directory')
+    finalSummaryRunning = false
+    return
+  }
+  const summaryOut = path.join(summarySessionDir, 'summary.txt')
+  const payload = {
+    cmd: 'summarize',
+    text: inputText,
+    out: summaryOut,
+    chunk_words: CHUNK_WORD_THRESHOLD,
+    context: { type: 'final', sessionDir: summarySessionDir },
+  }
+  const ok = sendProcessCommand(summarizerProcess, 'summarizer', JSON.stringify(payload) + '\n')
+  if (!ok) {
+    finalSummaryRunning = false
+    console.error('[summarizer final] failed to send summary command')
+  }
+}
+
+function handleChunkSummarizerEvent(obj: any, context: { type: string; id?: number; sessionDir?: string | null }): void {
+  if (context.type !== 'chunk') return
+  if (!context.sessionDir || context.sessionDir !== chunkSummariesSession) return
+  const chunkId = typeof context.id === 'number' ? context.id : null
+  if (obj.event === 'progress') {
+    return
+  }
+  if (obj.event === 'summary_delta') {
+    return
+  }
+  if (obj.event === 'done' || obj.event === 'error') {
+    chunkProcessing = false
+    if (obj.event === 'done' && chunkId !== null) {
+      const summaryText = (obj.text || '').trim()
+      if (summaryText) chunkSummaries.set(chunkId, summaryText)
+    }
+    if (obj.event === 'error') {
+      console.error(`[summarizer chunk ${chunkId}] error`, obj.msg)
+    }
+    processChunkQueue()
+    maybeStartPendingFinalSummary()
+  }
+}
+
+function formatActionItemsForDisplay(text: string): string {
+  const marker = 'Action Items:'
+  const idx = text.indexOf(marker)
+  if (idx === -1) return text
+  const before = text.slice(0, idx)
+  const remainder = text.slice(idx + marker.length)
+  const trimmed = remainder.trim()
+  if (!trimmed) return `${before}${marker}`
+  const matches: string[] = []
+  const entryRegex = /\s*(\d+)(?:\.|\))?\s*([\s\S]*?)(?=\s*\d+(?:\.|\))?\s|$)/g
+  let match: RegExpExecArray | null
+  while ((match = entryRegex.exec(trimmed))) {
+    const num = match[1]
+    const content = match[2].trim()
+    if (!content) continue
+    matches.push(`${num}. ${content}`)
+  }
+  if (matches.length > 0) {
+    return `${before}${marker}\n${matches.join('\n')}`
+  }
+  return `${before}${marker}\n${trimmed}`
+}
 
 function sendBootstrapStatus(state: 'running' | 'done' | 'error', message: string, percent?: number) {
   try {
@@ -380,7 +560,6 @@ async function runSetupScript(whisperModel: string, whisperDir: string): Promise
             sendBootstrapStatus('error', obj.message || 'setup failed')
           }
         } catch {
-          console.log('[setup]', line)
         }
       }
     })
@@ -544,9 +723,23 @@ function startSummarizerIfNeeded(modelPath: string | null) {
       if (!line) continue
       try {
         const obj = JSON.parse(line)
+        const context = obj.context as { type?: string; id?: number; sessionDir?: string } | undefined
+        const contextSessionDir = context?.sessionDir ?? null
+        if (context?.type === 'chunk') {
+          handleChunkSummarizerEvent(obj, context)
+          continue
+        }
+        const isFinalContext = context?.type === 'final'
+        if (isFinalContext && (!pendingFinalSummarySession || contextSessionDir !== pendingFinalSummarySession)) {
+          continue
+        }
+        const summarySessionDir = contextSessionDir || pendingFinalSummarySession || currentSessionDir
+        if (isFinalContext && (obj.event === 'done' || obj.event === 'error')) {
+          finalSummaryRunning = false
+        }
         if (obj.event === 'summary_start') {
           try {
-            win?.webContents.send('summary-stream', { sessionDir: currentSessionDir, reset: true })
+            win?.webContents.send('summary-stream', { sessionDir: summarySessionDir, reset: true })
           } catch (e) {
             console.error('failed to send summary-stream reset', e)
           }
@@ -554,23 +747,26 @@ function startSummarizerIfNeeded(modelPath: string | null) {
           const delta = obj.text || ''
           if (delta) {
             try {
-              win?.webContents.send('summary-stream', { sessionDir: currentSessionDir, delta })
+              win?.webContents.send('summary-stream', { sessionDir: summarySessionDir, delta })
             } catch (e) {
               console.error('failed to send summary-stream delta', e)
             }
           }
         } else if (obj.event === 'done') {
           const summaryOut = obj.out
-          const summaryText = obj.text || ''
+          const summaryText = formatActionItemsForDisplay(obj.text || '')
           try {
-            win?.webContents.send('summary-ready', { sessionDir: currentSessionDir, summaryPath: summaryOut, text: summaryText })
+            win?.webContents.send('summary-ready', { sessionDir: summarySessionDir, summaryPath: summaryOut, text: summaryText })
           } catch (e) {
             console.error('failed to send summary-ready', e)
           }
           try {
-            win?.webContents.send('summary-status', { state: 'done', sessionDir: currentSessionDir, message: 'summary complete' })
+            win?.webContents.send('summary-status', { state: 'done', sessionDir: summarySessionDir, message: 'summary complete' })
           } catch (e) {
             console.error('failed to send summary-status done', e)
+          }
+          if (isFinalContext) {
+            pendingFinalSummarySession = null
           }
         } else if (obj.event === 'followup_done') {
           const requestId = obj.id
@@ -582,21 +778,22 @@ function startSummarizerIfNeeded(modelPath: string | null) {
           } else {
             console.warn('[summarizer] follow-up done with no request id', obj.id)
           }
-        } else if (obj.event === 'loaded') {
-          console.log('[summarizer] loaded', obj.model)
         } else if (obj.event === 'progress') {
-          console.log('[summarizer]', obj.msg)
+          if (context?.type !== 'final') continue
           try {
-            win?.webContents.send('summary-status', { state: 'running', sessionDir: currentSessionDir, message: obj.msg || 'summarizing' })
+            win?.webContents.send('summary-status', { state: 'running', sessionDir: summarySessionDir, message: obj.msg || 'summarizing' })
           } catch (e) {
             console.error('failed to send summary-status running', e)
           }
         } else if (obj.event === 'error') {
           console.error('[summarizer error]', obj.msg)
           try {
-            win?.webContents.send('summary-status', { state: 'error', sessionDir: currentSessionDir, message: obj.msg || 'summary error' })
+            win?.webContents.send('summary-status', { state: 'error', sessionDir: summarySessionDir, message: obj.msg || 'summary error' })
           } catch (e) {
             console.error('failed to send summary-status error', e)
+          }
+          if (isFinalContext) {
+            pendingFinalSummarySession = null
           }
         } else if (obj.event === 'followup_error') {
           const requestId = obj.id
@@ -609,13 +806,13 @@ function startSummarizerIfNeeded(modelPath: string | null) {
             console.warn('[summarizer] follow-up error with no request id', obj.id, obj.msg)
           }
         }
-      } catch (e) {
-        console.error('failed to parse summarizer stdout line', e, line)
+      } catch {
+        // ignore non-JSON metadata
       }
     }
   })
   else console.error('[summarizer] stdout not available')
-  if (summarizerProcess.stderr) summarizerProcess.stderr.on('data', (d) => console.error('[summarizer err]', d.toString().trim()))
+  if (summarizerProcess.stderr) summarizerProcess.stderr.on('data', () => {})
   else console.error('[summarizer] stderr not available')
   summarizerProcess.on('error', (err) => {
     console.error('[summarizer spawn error]', err)
@@ -655,16 +852,13 @@ function handleTranscriptReady(outPath: string, text: string) {
       throw new Error('summary model not found')
     }
     startSummarizerIfNeeded(modelPath)
-    const summaryOut = path.join(currentSessionDir || '', 'summary.txt')
     try {
       win?.webContents.send('summary-status', { state: 'starting', sessionDir: currentSessionDir, message: 'starting summarization' })
     } catch (e) {
       console.error('failed to send summary-status starting', e)
     }
     if (!summarizerProcess) throw new Error('summarizer not running')
-    if (!sendProcessCommand(summarizerProcess, 'summarizer', JSON.stringify({ cmd: 'summarize', file: outPath, out: summaryOut }) + '\n')) {
-      throw new Error('summarizer stdin not available')
-    }
+    requestFinalSummary(text)
   } catch (e) {
     console.error('failed to start summarizer', e)
     try {
@@ -677,36 +871,60 @@ function handleTranscriptReady(outPath: string, text: string) {
 
 function handleRecordOutput(data: Buffer) {
   recordStdoutBuf += data.toString()
-  const parts = recordStdoutBuf.split('\n')
-  recordStdoutBuf = parts.pop() || ''
-  for (const rawLine of parts) {
-    const line = rawLine.trim()
-    if (!line) continue
-    try {
-      const obj = JSON.parse(line)
-      if (obj.event === 'partial') {
-        try {
-          win?.webContents.send('transcript-partial', {
-            sessionDir: currentSessionDir,
-            text: obj.text || '',
-            fullText: obj.full_text || obj.fullText || '',
-          })
-        } catch (e) {
-          console.error('failed to send transcript-partial', e)
+    const parts = recordStdoutBuf.split('\n')
+    recordStdoutBuf = parts.pop() || ''
+    for (const rawLine of parts) {
+      const line = rawLine.trim()
+      if (!line) continue
+      try {
+        const obj = JSON.parse(line)
+        if (obj.event === 'partial') {
+          try {
+            win?.webContents.send('transcript-partial', {
+              sessionDir: currentSessionDir,
+              text: obj.text || '',
+              fullText: obj.full_text || obj.fullText || '',
+            })
+          } catch (e) {
+            console.error('failed to send transcript-partial', e)
+          }
+          const partialText = obj.full_text || obj.fullText || obj.text || ''
+          processTranscriptPartialText(partialText)
+          continue
         }
+        if (obj.event === 'started') {
+          const startedAt =
+            typeof obj.started_at === 'number'
+              ? obj.started_at
+              : typeof obj.startedAt === 'number'
+              ? obj.startedAt
+              : null
+          const startedAtMs = startedAt ? Math.round(startedAt * 1000) : Date.now()
+          try {
+            win?.webContents.send('recording-started', { sessionDir: currentSessionDir, startedAtMs })
+          } catch (e) {
+            console.error('failed to send recording-started', e)
+          }
+          continue
+        }
+        if (obj.event === 'ready') {
+          try {
+            win?.webContents.send('recording-ready', { ready: true })
+          } catch (e) {
+            console.error('failed to send recording-ready', e)
+          }
+          continue
+        }
+        if (obj.event === 'done' && obj.out) {
+          const outPath = obj.out
+          const text = obj.text || ''
+          handleTranscriptReady(outPath, text)
+          continue
+        }
+      } catch {
         continue
       }
-      if (obj.event === 'done' && obj.out) {
-        const outPath = obj.out
-        const text = obj.text || ''
-        handleTranscriptReady(outPath, text)
-        continue
-      }
-    } catch {
-      // not json
     }
-    console.log('[backend]', line)
-  }
 }
 
 
@@ -736,6 +954,11 @@ async function startBackend() {
   if (!ready) return
 
   recordStdoutBuf = ''
+  try {
+    win?.webContents.send('recording-ready', { ready: false })
+  } catch (e) {
+    console.error('failed to send recording-ready false', e)
+  }
 
   const scriptPath = path.join(getBackendRoot(), 'record_and_transcribe.py')
 
@@ -769,6 +992,11 @@ async function startBackend() {
   backendProcess.on('exit', (code) => {
     console.log('[backend] exited with code', code)
     backendProcess = null
+    try {
+      win?.webContents.send('recording-ready', { ready: false })
+    } catch (e) {
+      console.error('failed to send recording-ready false', e)
+    }
   })
 }
 
@@ -805,12 +1033,14 @@ function resumeBackend() {
 ipcMain.on('backend-start', (_evt, opts: { deviceIndex?: number; model?: string } = {}) => {
   void (async () => {
     console.log('[ipc] backend-start', opts)
+    resetChunkSummariesState()
     if (opts && opts.model) currentModelName = opts.model
     await startBackend()
     if (!backendProcess) return
 
     const sessionDir = makeSessionDir()
     currentSessionDir = sessionDir
+    chunkSummariesSession = sessionDir
     const outWav = path.join(sessionDir, 'audio.wav')
     const outTranscript = path.join(sessionDir, 'transcript.txt')
     console.log('[backend] sessionDir=', sessionDir)
@@ -964,7 +1194,7 @@ function createWindow() {
   // Test active push message to Renderer-process.
   win.webContents.on('did-finish-load', () => {
     win?.webContents.send('main-process-message', new Date().toLocaleString())
-    void ensureDependencies()
+    void startBackend()
   })
 
   if (VITE_DEV_SERVER_URL) {

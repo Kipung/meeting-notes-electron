@@ -20,6 +20,8 @@ contextBridge.exposeInMainWorld('backend', {
   onTranscript: (cb: (ev: any, data: any) => void) => onChannel('transcript-ready', cb),
   onTranscriptPartial: (cb: (ev: any, data: any) => void) => onChannel('transcript-partial', cb),
   onTranscriptionStatus: (cb: (ev: any, data: any) => void) => onChannel('transcription-status', cb),
+  onRecordingReady: (cb: (ev: any, data: any) => void) => onChannel('recording-ready', cb),
+  onRecordingStarted: (cb: (ev: any, data: any) => void) => onChannel('recording-started', cb),
   onSummary: (cb: (ev: any, data: any) => void) => onChannel('summary-ready', cb),
   onSummaryStatus: (cb: (ev: any, data: any) => void) => onChannel('summary-status', cb),
   onSummaryStream: (cb: (ev: any, data: any) => void) => onChannel('summary-stream', cb),

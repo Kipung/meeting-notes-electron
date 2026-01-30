@@ -97,6 +97,21 @@
   min-width: 0;
 }
 
+.output-panel__body {
+  white-space: pre-wrap;
+  background: #151515;
+  color: #f1f1f1;
+  padding: 10px;
+  min-height: 160px;
+  border: 1px solid #2b2b2b;
+  border-radius: 6px;
+}
+
+.output-panel__body--scrollable {
+  max-height: 320px;
+  overflow-y: auto;
+}
+
 .path-label {
   overflow-wrap: anywhere;
   word-break: break-word;

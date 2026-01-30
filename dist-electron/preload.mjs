@@ -18,6 +18,8 @@ electron.contextBridge.exposeInMainWorld("backend", {
   onTranscript: (cb) => onChannel("transcript-ready", cb),
   onTranscriptPartial: (cb) => onChannel("transcript-partial", cb),
   onTranscriptionStatus: (cb) => onChannel("transcription-status", cb),
+  onRecordingReady: (cb) => onChannel("recording-ready", cb),
+  onRecordingStarted: (cb) => onChannel("recording-started", cb),
   onSummary: (cb) => onChannel("summary-ready", cb),
   onSummaryStatus: (cb) => onChannel("summary-status", cb),
   onSummaryStream: (cb) => onChannel("summary-stream", cb),

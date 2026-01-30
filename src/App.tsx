@@ -39,6 +39,7 @@ function App() {
   const [setupState, setSetupState] = useState<StepState>('idle')
   const [setupMessage, setSetupMessage] = useState('')
   const [setupPercent, setSetupPercent] = useState<number | null>(null)
+  const [recorderReady, setRecorderReady] = useState(false)
   const [elapsedSeconds, setElapsedSeconds] = useState(0)
   const [blinkOn, setBlinkOn] = useState(false)
   const recordingStartRef = useRef<number | null>(null)
@@ -116,6 +117,18 @@ function App() {
       setStatusDetail(data.message || '')
     })
 
+    const offRecordingReady = (window as any).backend.onRecordingReady((_ev: any, data: any) => {
+      setRecorderReady(Boolean(data?.ready))
+    })
+
+    const offRecordingStarted = (window as any).backend.onRecordingStarted((_ev: any, data: any) => {
+      const startedAtMs = typeof data?.startedAtMs === 'number' ? data.startedAtMs : Date.now()
+      recordingStartRef.current = startedAtMs
+      pauseStartRef.current = null
+      pausedMsRef.current = 0
+      setElapsedSeconds(0)
+    })
+
     const offSummary = (window as any).backend.onSummary((_ev: any, data: any) => {
       setStatus('summary-ready')
       setStatusDetail('summary ready')
@@ -160,6 +173,8 @@ function App() {
       offTranscript()
       offTranscriptPartial()
       offTranscriptionStatus()
+      offRecordingReady()
+      offRecordingStarted()
       offSummary()
       offSummaryStream()
       offSummaryStatus()
@@ -220,7 +235,7 @@ function App() {
     setTranscriptionState('idle')
     setSummarizationState('idle')
     setSessionDir(null)
-    recordingStartRef.current = Date.now()
+    recordingStartRef.current = null
     pauseStartRef.current = null
     pausedMsRef.current = 0
     setElapsedSeconds(0)
@@ -551,7 +566,7 @@ function App() {
           <div className="control-row" style={{ marginBottom: 6 }}>
             <button
               onClick={onPrimaryToggle}
-              disabled={setupState !== 'done' || (running && !canPause)}
+              disabled={setupState !== 'done' || !recorderReady || (running && !canPause)}
               title={primaryActionLabel}
               aria-label={primaryActionLabel}
               style={{
@@ -561,12 +576,12 @@ function App() {
                 border: '1px solid #2b2b2b',
                 background: '#151515',
                 color: primaryActionColor,
-                cursor: setupState !== 'done' || (running && !canPause) ? 'not-allowed' : 'pointer',
+                cursor: setupState !== 'done' || !recorderReady || (running && !canPause) ? 'not-allowed' : 'pointer',
                 display: 'inline-flex',
                 alignItems: 'center',
                 justifyContent: 'center',
                 padding: 0,
-                opacity: setupState !== 'done' || (running && !canPause) ? 0.5 : 1,
+                opacity: setupState !== 'done' || !recorderReady || (running && !canPause) ? 0.5 : 1,
               }}
             >
               {primaryActionIcon}
@@ -621,7 +636,7 @@ function App() {
           <button onClick={() => copyToClipboard(transcript)} disabled={!transcript} style={{ marginBottom: 8 }}>
             Copy transcript
           </button>
-          <div style={{ whiteSpace: 'pre-wrap', background: '#151515', color: '#f1f1f1', padding: 10, minHeight: 160, border: '1px solid #2b2b2b', borderRadius: 6 }}>{transcript || '(empty)'}</div>
+          <div className="output-panel__body output-panel__body--scrollable">{transcript || '(empty)'}</div>
         </div>
 
         <div className="output-panel">
@@ -629,7 +644,7 @@ function App() {
           <button onClick={() => copyToClipboard(summaryWithMeta)} disabled={!summary} style={{ marginBottom: 8 }}>
             Copy summary
           </button>
-          <div style={{ whiteSpace: 'pre-wrap', background: '#151515', color: '#f1f1f1', padding: 10, minHeight: 160, border: '1px solid #2b2b2b', borderRadius: 6 }}>{summaryWithMeta || '(empty)'}</div>
+          <div className="output-panel__body">{summaryWithMeta || '(empty)'}</div>
         </div>
 
         <div className="output-panel">

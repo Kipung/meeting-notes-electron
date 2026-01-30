@@ -20,6 +20,8 @@ interface Window {
     onSession: (cb: (ev: any, data: any) => void) => () => void
     onTranscript: (cb: (ev: any, data: any) => void) => () => void
     onTranscriptionStatus: (cb: (ev: any, data: any) => void) => () => void
+    onRecordingReady: (cb: (ev: any, data: any) => void) => () => void
+    onRecordingStarted: (cb: (ev: any, data: any) => void) => () => void
     onSummary: (cb: (ev: any, data: any) => void) => () => void
     onSummaryStatus: (cb: (ev: any, data: any) => void) => () => void
     onSummaryStream: (cb: (ev: any, data: any) => void) => () => void

@@ -71,7 +71,11 @@ def max_tokens_from_env(default: int) -> int:
 
 DEFAULT_PROMPT = (
     "You are an assistant that summarizes meeting transcripts.\n"
-    "Produce a concise summary in 5-7 sentences, and then list 3-6 action items if present.\n"
+    "Produce a concise summary in 5-7 sentences, grounding every sentence in the transcript text.\n"
+    "After the summary, write an 'Action Items:' section containing at most five clearly worded tasks.\n"
+    "Each task must be directly supported by something that happened in the transcript; do not invent new topics or isolated keywords.\n"
+    "Format each action item on its own line prefixed by a number and a period (for example, '1. Follow up with ...').\n"
+    "If the transcript does not require any actions, write 'Action Items: none.'\n"
 )
 
 FOLLOWUP_PROMPT = (
@@ -211,16 +215,16 @@ class SummarizerDaemon:
             except Exception as e:
                 self.send({"event": "error", "msg": f"failed to load model: {e}"})
 
-    def summarize(self, text: str, out_path: Optional[str], chunk_words: int):
+    def summarize(self, text: str, out_path: Optional[str], chunk_words: int, context: Optional[dict] = None):
         with self.lock:
             if not self.client:
                 self.send({"event": "error", "msg": "model not loaded", "out": out_path})
                 return
-            self.send({"event": "summary_start", "out": out_path})
+            self.send({"event": "summary_start", "out": out_path, "context": context})
             word_count = count_words(text)
             if word_count < self.min_words:
                 msg = f"transcript too short ({word_count} words); skipping summary"
-                self.send({"event": "progress", "msg": msg})
+                self.send({"event": "progress", "msg": msg, "context": context})
                 summary = "Not enough content to summarize.\nAction Items: none."
                 if out_path:
                     try:
@@ -228,20 +232,20 @@ class SummarizerDaemon:
                         with open(out_path, "w", encoding="utf-8") as f:
                             f.write(summary)
                     except Exception as e:
-                        self.send({"event": "error", "msg": f"failed to write summary: {e}", "out": out_path})
+                        self.send({"event": "error", "msg": f"failed to write summary: {e}", "out": out_path, "context": context})
                         return
-                self.send({"event": "done", "out": out_path, "text": summary, "secs": 0})
+                self.send({"event": "done", "out": out_path, "text": summary, "secs": 0, "context": context})
                 return
             start = time.time()
             try:
                 summary = summarize_direct(
                     self.client,
                     text,
-                    on_progress=lambda msg: self.send({"event": "progress", "msg": msg}),
-                    on_stream=lambda delta: self.send({"event": "summary_delta", "text": delta, "out": out_path}),
+                    on_progress=lambda msg: self.send({"event": "progress", "msg": msg, "context": context}),
+                    on_stream=lambda delta: self.send({"event": "summary_delta", "text": delta, "out": out_path, "context": context}),
                 )
             except Exception as e:
-                self.send({"event": "error", "msg": f"summarization error: {e}", "out": out_path})
+                self.send({"event": "error", "msg": f"summarization error: {e}", "out": out_path, "context": context})
                 return
             dur = time.time() - start
             if out_path:
@@ -250,9 +254,9 @@ class SummarizerDaemon:
                     with open(out_path, "w", encoding="utf-8") as f:
                         f.write(summary)
                 except Exception as e:
-                    self.send({"event": "error", "msg": f"failed to write summary: {e}", "out": out_path})
+                    self.send({"event": "error", "msg": f"failed to write summary: {e}", "out": out_path, "context": context})
                     return
-            self.send({"event": "done", "out": out_path, "text": summary, "secs": dur})
+            self.send({"event": "done", "out": out_path, "text": summary, "secs": dur, "context": context})
 
     def followup_email(
         self,

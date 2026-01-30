@@ -166,6 +166,8 @@ def main():
     def send(obj):
         print(json.dumps(obj), flush=True)
 
+    send({"event": "ready"})
+
     def start_session(out_path: str, transcript_path: str, device_index):
         nonlocal capture_channels, capture_rate, input_chunk
         device_info = pa.get_device_info_by_index(device_index) if device_index is not None else pa.get_default_input_device_info()
@@ -221,7 +223,7 @@ def main():
                             return
                         audio_i16 = item
                         audio_f32 = audio_i16.astype(np.float32) / 32768.0
-                        result = whisper_model.transcribe(audio_f32, language="en", task="transcribe")
+                        result = whisper_model.transcribe(audio_f32, language="en", task="transcribe", fp16=False)
                         text = result.get("text", "").strip()
                         if text:
                             with state.transcript_lock:
@@ -235,7 +237,7 @@ def main():
 
             state.worker = threading.Thread(target=transcribe_worker, daemon=True)
             state.worker.start()
-            send({"event": "started", "out": out_path, "transcript_out": transcript_path})
+            send({"event": "started", "out": out_path, "transcript_out": transcript_path, "started_at": state.start_t})
 
     def stop_session(emit_error: bool = True):
         with session_lock:
