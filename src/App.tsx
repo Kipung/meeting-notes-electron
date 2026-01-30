@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import './App.css'
 
-const MODEL_CHOICES = ['tiny.en', 'small.en', 'base.en', 'medium.en']
+const DEFAULT_WHISPER_MODEL = 'small.en'
 type StepState = 'idle' | 'running' | 'paused' | 'done' | 'error'
 const STEP_COLORS: Record<StepState, string> = {
   idle: '#9e9e9e',
@@ -29,7 +29,6 @@ const getTodayDateString = () => {
 function App() {
   const [devices, setDevices] = useState<any[]>([])
   const [selectedDevice, setSelectedDevice] = useState<number | null>(null)
-  const [model, setModel] = useState<string>('small.en')
   const [running, setRunning] = useState(false)
   const [status, setStatus] = useState('idle')
   const [statusDetail, setStatusDetail] = useState('')
@@ -241,7 +240,7 @@ function App() {
     setElapsedSeconds(0)
     setRunning(true)
     setAudioDeleteMessage('')
-    ;(window as any).backend.start({ deviceIndex: selectedDevice, model })
+    ;(window as any).backend.start({ deviceIndex: selectedDevice, model: DEFAULT_WHISPER_MODEL })
   }
 
   const onStop = () => {
@@ -500,7 +499,6 @@ function App() {
                 <input
                   value={sessionSubject}
                   onChange={(e) => setSessionSubject(e.target.value)}
-                  placeholder="e.g. Study plan check-in"
                   style={{ width: '100%' }}
                 />
               </label>
@@ -515,7 +513,6 @@ function App() {
                 <input
                   value={studentId}
                   onChange={(e) => setStudentId(e.target.value)}
-                  placeholder="e.g. 20231234"
                   style={{ width: '100%' }}
                 />
               </label>
@@ -524,7 +521,6 @@ function App() {
                 <input
                   value={studentName}
                   onChange={(e) => setStudentName(e.target.value)}
-                  placeholder="e.g. Kim Minji"
                   style={{ width: '100%' }}
                 />
               </label>
@@ -533,7 +529,6 @@ function App() {
                 <input
                   value={coachInitials}
                   onChange={(e) => setCoachInitials(e.target.value)}
-                  placeholder="e.g. JS"
                   style={{ width: '100%' }}
                 />
               </label>
@@ -547,17 +542,6 @@ function App() {
               {devices.map((d) => (
                 <option key={d.index} value={d.index}>
                   {d.index}: {d.name} (in:{d.maxInputChannels} out:{d.maxOutputChannels})
-                </option>
-              ))}
-            </select>
-          </div>
-
-          <div className="form-inline" style={{ marginBottom: 6 }}>
-            <label>Model: </label>
-            <select className="form-inline__control" value={model} onChange={(e) => setModel(e.target.value)}>
-              {MODEL_CHOICES.map((m) => (
-                <option key={m} value={m}>
-                  {m}
                 </option>
               ))}
             </select>
