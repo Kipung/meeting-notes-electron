@@ -188,7 +188,7 @@ function resetChunkSummariesState() {
   chunkSummaries = /* @__PURE__ */ new Map();
   lastTranscriptOffset = 0;
   transcriptBuffer = "";
-  chunkSummariesEnabled = true;
+  chunkSummariesEnabled = false;
   chunkSummariesSession = null;
   finalSummaryPending = null;
   finalSummaryRunning = false;

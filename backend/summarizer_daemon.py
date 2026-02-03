@@ -76,6 +76,7 @@ DEFAULT_PROMPT = (
     "After the summary, write an 'Action Items:' section containing at most five clearly worded tasks.\n"
     "Each task must be directly supported by something that happened in the transcript; do not invent new topics or isolated keywords.\n"
     "Format each action item on its own line prefixed by a bullet point and a period (for example, '• Follow up with ...').\n"
+    "Analyze and see whether any action items are needed based on the transcript content.\n"
     "If the transcript does not require any actions, write 'Action Items: none.'\n"
 )
 
@@ -83,7 +84,8 @@ FOLLOWUP_PROMPT = (
     "You are an assistant that drafts a warm, professional follow-up email after a student support session.\n"
     "Use the summary below as the only source of truth.\n"
     "Write in a warm, supportive tone.\n"
-    "If a student name is provided, use it in the greeting.\n"
+    "If a student name is provided, use it exactly once in the greeting and do not invent any other names.\n"
+    "If no student name is supplied, do not introduce or refer to any proper names; stay name-agnostic and use a generic greeting (e.g., 'Hello').\n"
     "Include a Subject line, then a blank line, then the email body.\n"
     "If the summary includes action items, include them under an 'Action items:' section.\n"
     "Do not add extra notes, disclaimers, or meta commentary.\n"

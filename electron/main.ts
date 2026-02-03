@@ -242,7 +242,7 @@ function resetChunkSummariesState(): void {
   chunkSummaries = new Map()
   lastTranscriptOffset = 0
   transcriptBuffer = ''
-  chunkSummariesEnabled = true
+  chunkSummariesEnabled = false
   chunkSummariesSession = null
   finalSummaryPending = null
   finalSummaryRunning = false
