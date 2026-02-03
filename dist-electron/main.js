@@ -12,7 +12,7 @@ const VITE_DEV_SERVER_URL = process.env["VITE_DEV_SERVER_URL"];
 const MAIN_DIST = path.join(process.env.APP_ROOT, "dist-electron");
 const RENDERER_DIST = path.join(process.env.APP_ROOT, "dist");
 process.env.VITE_PUBLIC = VITE_DEV_SERVER_URL ? path.join(process.env.APP_ROOT, "public") : RENDERER_DIST;
-const DEFAULT_SUMMARY_MODEL_URL = "https://huggingface.co/unsloth/Llama-3.2-3B-Instruct-GGUF/resolve/main/Llama-3.2-3B-Instruct-Q4_K_M.gguf";
+const DEFAULT_SUMMARY_MODEL_NAME = "Llama-3.2-1B-Instruct-Q6_K.gguf";
 let win;
 let backendProcess = null;
 let currentSessionDir = null;
@@ -521,10 +521,18 @@ function resolveSummaryModelPath() {
   const override = process.env["SUMMODEL"];
   if (override && override.trim()) return override;
   if (downloadedSummaryModelPath && fs.existsSync(downloadedSummaryModelPath)) return downloadedSummaryModelPath;
+  const bundledCandidates = [
+    path.join(getModelsRoot(), DEFAULT_SUMMARY_MODEL_NAME),
+    path.join(getPackagedModelsRoot(), DEFAULT_SUMMARY_MODEL_NAME),
+    path.join(process.env.APP_ROOT, "models", DEFAULT_SUMMARY_MODEL_NAME)
+  ];
+  for (const candidate of bundledCandidates) {
+    if (fs.existsSync(candidate)) return candidate;
+  }
   const candidates = [getModelsRoot(), getPackagedModelsRoot(), path.join(process.env.APP_ROOT, "models")];
   for (const modelsDir of candidates) {
     if (!fs.existsSync(modelsDir)) continue;
-    const preferred = path.join(modelsDir, "Llama-3.2-3B-Instruct-Q4_K_M.gguf");
+    const preferred = path.join(modelsDir, DEFAULT_SUMMARY_MODEL_NAME);
     if (fs.existsSync(preferred)) return preferred;
     try {
       const entries = fs.readdirSync(modelsDir, { withFileTypes: true });
@@ -555,8 +563,13 @@ async function ensureSummaryModel() {
     throw new Error("summary model missing in installer");
   }
   const url = process.env["SUMMODEL_URL"] || DEFAULT_SUMMARY_MODEL_URL;
+  if (!url) {
+    throw new Error(
+      `summary model missing; place ${DEFAULT_SUMMARY_MODEL_NAME} under ${path.join(process.env.APP_ROOT, "models")} or set SUMMODEL_URL to download it`
+    );
+  }
   const modelsDir = getModelsRoot();
-  let targetName = "Llama-3.2-3B-Instruct-Q4_K_M.gguf";
+  let targetName = DEFAULT_SUMMARY_MODEL_NAME;
   try {
     const parsed = new URL(url);
     const base = path.basename(parsed.pathname);

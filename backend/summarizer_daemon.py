@@ -72,9 +72,10 @@ def max_tokens_from_env(default: int) -> int:
 DEFAULT_PROMPT = (
     "You are an assistant that summarizes meeting transcripts.\n"
     "Produce a concise summary in 5-7 sentences, grounding every sentence in the transcript text.\n"
+    "For summary, it should be a clean looking paragraph, no weird punctuation or line breaks.\n"
     "After the summary, write an 'Action Items:' section containing at most five clearly worded tasks.\n"
     "Each task must be directly supported by something that happened in the transcript; do not invent new topics or isolated keywords.\n"
-    "Format each action item on its own line prefixed by a number and a period (for example, '1. Follow up with ...').\n"
+    "Format each action item on its own line prefixed by a bullet point and a period (for example, '• Follow up with ...').\n"
     "If the transcript does not require any actions, write 'Action Items: none.'\n"
 )
 
