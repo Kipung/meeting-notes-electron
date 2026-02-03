@@ -73,11 +73,10 @@ DEFAULT_PROMPT = (
     "You are an assistant that summarizes meeting transcripts.\n"
     "Produce a concise summary in 5-7 sentences, grounding every sentence in the transcript text.\n"
     "For summary, it should be a clean looking paragraph, no weird punctuation or line breaks.\n"
-    "After the summary, write an 'Action Items:' section containing at most five clearly worded tasks.\n"
-    "Each task must be directly supported by something that happened in the transcript; do not invent new topics or isolated keywords.\n"
-    "Format each action item on its own line prefixed by a bullet point and a period (for example, '• Follow up with ...').\n"
-    "Analyze and see whether any action items are needed based on the transcript content.\n"
-    "If the transcript does not require any actions, write 'Action Items: none.'\n"
+    "After the summary, include an 'Action Items:' section only when the transcript clearly supports them.\n"
+    "Limit the section to at most five tasks, each introduced with a bullet point.\n"
+    "Only report a task if it is directly supported by something that happened in the transcript or summary; if no real follow-up is required, write 'Action Items: none.'\n"
+    "When you do list actions, mention the topic or person from the transcript that justifies that task so it is clearly traceable.\n"
 )
 
 FOLLOWUP_PROMPT = (
