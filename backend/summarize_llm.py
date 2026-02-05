@@ -11,6 +11,7 @@ This script summarizes the transcript in a single pass.
 
 import argparse
 import os
+import re
 import sys
 
 try:
@@ -33,8 +34,21 @@ def min_words_from_env(default: int) -> int:
 
 DEFAULT_PROMPT = (
     "You are an assistant that summarizes meeting transcripts.\n"
-    "Produce a concise summary in 4-6 sentences, and then list 3-6 action items if present.\n"
+    "Produce a concise summary in 5-7 sentences, grounding every sentence in the transcript text.\n"
+    "For summary, keep it as a tidy paragraph with normal punctuation and no awkward line breaks.\n"
+    "After the summary, include an 'Action Items:' section only when the transcript clearly supports them.\n"
+    "Limit the section to at most five tasks, each introduced with a bullet point that starts with '-' and stays on its own line.\n"
+    "Only report a task if it is directly supported by something that happened in the transcript or summary; if no real follow-up is required, write 'Action Items: none.'\n"
+    "When you do list actions, mention the topic or person from the transcript that justifies that task so it is clearly traceable.\n"
 )
+SUMMARY_EXPANSION_SUFFIX = (
+    "\nIf the paragraph still has fewer than five sentences, rewrite it so the summary paragraph contains 5-7 sentences, "
+    "adding more detail from the transcript while keeping the Action Items section as instructed."
+)
+EXPANDED_SUMMARY_PROMPT = DEFAULT_PROMPT + SUMMARY_EXPANSION_SUFFIX
+MIN_SUMMARY_SENTENCES = 5
+ACTION_ITEMS_MARKER = "Action Items:"
+SENTENCE_SPLIT_RE = re.compile(r"[^.!?]+[.!?]*")
 
 
 def summarize_with_llm(client: Llama, text: str, prompt: str, max_tokens: int = 256) -> str:
@@ -48,6 +62,31 @@ def summarize_with_llm(client: Llama, text: str, prompt: str, max_tokens: int = 
     return resp.get("choices", [{}])[0].get("text", "").strip()
 
 
+def extract_summary_body(text: str) -> str:
+    idx = text.find(ACTION_ITEMS_MARKER)
+    return text[:idx] if idx != -1 else text
+
+
+def count_summary_sentences(text: str) -> int:
+    body = extract_summary_body(text).strip()
+    if not body:
+        return 0
+    matches = SENTENCE_SPLIT_RE.findall(body)
+    return sum(1 for match in matches if match.strip())
+
+
+def ensure_min_sentences(summary: str, transcript: str, client: Llama) -> str:
+    if count_summary_sentences(summary) >= MIN_SUMMARY_SENTENCES:
+        return summary
+    try:
+        expanded = summarize_with_llm(client, transcript, EXPANDED_SUMMARY_PROMPT, max_tokens=512)
+        if expanded:
+            return expanded
+    except Exception as e:
+        print(f"warning: summary expansion failed: {e}", file=sys.stderr)
+    return summary
+
+
 def create_llama(model_path: str, n_ctx: int) -> Llama:
     try:
         return Llama(model_path=model_path, n_ctx=n_ctx)
@@ -55,9 +94,10 @@ def create_llama(model_path: str, n_ctx: int) -> Llama:
         return Llama(model_path=model_path)
 
 
-def summarize_direct(model_path: str, text: str, n_ctx: int = 2048) -> str:
+def summarize_direct(model_path: str, text: str, n_ctx: int = 2048):
     client = create_llama(model_path, n_ctx)
-    return summarize_with_llm(client, text, DEFAULT_PROMPT, max_tokens=512)
+    summary = summarize_with_llm(client, text, DEFAULT_PROMPT, max_tokens=512)
+    return client, summary
 
 
 def main():
@@ -112,7 +152,8 @@ def main():
     else:
         n_ctx = default_n_ctx
 
-    summary = summarize_direct(args.model_path, text, n_ctx=n_ctx)
+    client, summary = summarize_direct(args.model_path, text, n_ctx=n_ctx)
+    summary = ensure_min_sentences(summary, text, client)
 
     if args.out:
         os.makedirs(os.path.dirname(args.out) or ".", exist_ok=True)

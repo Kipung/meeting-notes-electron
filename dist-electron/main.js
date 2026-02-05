@@ -315,21 +315,53 @@ function formatActionItemsForDisplay(text) {
   const remainder = text.slice(idx + marker.length);
   const trimmed = remainder.trim();
   if (!trimmed) return `${before}${marker}`;
-  const matches = [];
-  const entryRegex = /\s*(\d+)(?:\.|\))?\s*([\s\S]*?)(?=\s*\d+(?:\.|\))?\s|$)/g;
-  let match;
-  while (match = entryRegex.exec(trimmed)) {
-    const num = match[1];
-    const content = match[2].trim();
-    if (!content) continue;
-    matches.push(`${num}. ${content}`);
+  const normalizedNone = trimmed.replace(/\.*$/, "").trim().toLowerCase();
+  if (normalizedNone === "none") {
+    return `${before}${marker} ${trimmed}`;
   }
-  if (matches.length > 0) {
+  const items = parseActionItems(trimmed);
+  if (items.length === 0) {
     return `${before}${marker}
-${matches.join("\n")}`;
-  }
-  return `${before}${marker}
 ${trimmed}`;
+  }
+  const limitedItems = items.slice(0, 5);
+  const bullets = limitedItems.map((item) => `- ${item}`);
+  return `${before}${marker}
+${bullets.join("\n")}`;
+}
+function splitActionSentences(text) {
+  const normalized = text.replace(/\s+/g, " ").trim();
+  if (!normalized) return [];
+  const matches = normalized.match(/[^.!?]+[.!?]*/g) || [];
+  return matches.map((segment) => segment.trim()).filter(Boolean);
+}
+function stripLeadingBullet(line) {
+  return line.replace(/^[•\-\*]\s*/, "").trim();
+}
+function parseActionItems(raw) {
+  const normalized = raw.replace(/\r/g, "").trim();
+  if (!normalized) return [];
+  const lines = normalized.split(/\n+/).map((line) => line.trim()).filter(Boolean);
+  if (lines.length > 1) {
+    return lines.map(stripLeadingBullet);
+  }
+  const singleLine = lines[0];
+  const singleBulletMatch = singleLine.match(/^[•\-\*]\s*(.+)$/);
+  if (singleBulletMatch) {
+    return [singleBulletMatch[1].trim()];
+  }
+  const numberedParts = singleLine.split(/(?=\d+\.)/g).map((part) => part.replace(/^\d+\.\s*/, "").trim()).filter(Boolean);
+  if (numberedParts.length > 1) {
+    return numberedParts;
+  }
+  const sentences = splitActionSentences(singleLine);
+  if (sentences.length > 1) {
+    return sentences;
+  }
+  if (sentences.length === 1) {
+    return sentences;
+  }
+  return [singleLine];
 }
 function sendBootstrapStatus(state, message, percent) {
   try {
