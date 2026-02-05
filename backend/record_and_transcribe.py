@@ -256,7 +256,7 @@ def main():
                         pass
                     return
                 loopback_rate = int(loopback_info.get("defaultSampleRate", TARGET_RATE))
-                loopback_channels = int(loopback_info.get("maxInputChannels", TARGET_CHANNELS)) or TARGET_CHANNELS
+                loopback_channels = 2 if loopback_info.get("maxInputChannels", 0) >= 2 else 1
                 loopback_min_chunk = int(np.ceil(loopback_rate / 31.25))
                 loopback_chunk = max(loopback_min_chunk, int(np.ceil(loopback_rate * (TARGET_CHUNK / float(TARGET_RATE)))))
                 loopback_kwargs = dict(
@@ -268,15 +268,30 @@ def main():
                     input_device_index=loopback_device_index,
                 )
                 try:
+                    if sys.platform == "win32":
+                        loopback_kwargs["as_loopback"] = True
                     loopback_stream = pa.open(**loopback_kwargs)
                 except Exception as e:
-                    send({"event": "error", "msg": f"failed to open loopback stream: {e}"})
-                    try:
-                        stream.stop_stream()
-                        stream.close()
-                    except Exception:
-                        pass
-                    return
+                    if sys.platform == "win32" and "as_loopback" in loopback_kwargs:
+                        try:
+                            loopback_kwargs.pop("as_loopback", None)
+                            loopback_stream = pa.open(**loopback_kwargs)
+                        except Exception as e2:
+                            send({"event": "error", "msg": f"failed to open loopback stream: {e2}"})
+                            try:
+                                stream.stop_stream()
+                                stream.close()
+                            except Exception:
+                                pass
+                            return
+                    else:
+                        send({"event": "error", "msg": f"failed to open loopback stream: {e}"})
+                        try:
+                            stream.stop_stream()
+                            stream.close()
+                        except Exception:
+                            pass
+                        return
             sample_width = pa.get_sample_size(pyaudio.paInt16)
             wf = wave.open(out_path, "wb")
             wf.setnchannels(TARGET_CHANNELS)
