@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import './App.css'
 
 const MODEL_CHOICES = ['tiny.en', 'small.en', 'base.en', 'medium.en']
+const DEFAULT_WHISPER_MODEL = 'small.en'
 type StepState = 'idle' | 'running' | 'paused' | 'done' | 'error'
 const STEP_COLORS: Record<StepState, string> = {
   idle: '#9e9e9e',
@@ -31,7 +32,7 @@ function App() {
   const [loopbackDevices, setLoopbackDevices] = useState<any[]>([])
   const [selectedDevice, setSelectedDevice] = useState<number | null>(null)
   const [selectedLoopback, setSelectedLoopback] = useState<number | null>(null)
-  const [model, setModel] = useState<string>('small.en')
+  const [model, setModel] = useState<string>(DEFAULT_WHISPER_MODEL)
   const [running, setRunning] = useState(false)
   const [status, setStatus] = useState('idle')
   const [statusDetail, setStatusDetail] = useState('')
@@ -41,6 +42,7 @@ function App() {
   const [setupState, setSetupState] = useState<StepState>('idle')
   const [setupMessage, setSetupMessage] = useState('')
   const [setupPercent, setSetupPercent] = useState<number | null>(null)
+  const [recorderReady, setRecorderReady] = useState(false)
   const [elapsedSeconds, setElapsedSeconds] = useState(0)
   const [blinkOn, setBlinkOn] = useState(false)
   const recordingStartRef = useRef<number | null>(null)
@@ -61,6 +63,7 @@ function App() {
   const [followUpInstructions, setFollowUpInstructions] = useState('')
   const [followUpGenerating, setFollowUpGenerating] = useState(false)
   const [followUpStatus, setFollowUpStatus] = useState('')
+  const [processingRecordingFile, setProcessingRecordingFile] = useState(false)
   const isWindows = /Windows/.test(navigator.userAgent)
 
   const getElapsedSeconds = () => {
@@ -124,6 +127,18 @@ function App() {
       setStatusDetail(data.message || '')
     })
 
+    const offRecordingReady = (window as any).backend.onRecordingReady((_ev: any, data: any) => {
+      setRecorderReady(Boolean(data?.ready))
+    })
+
+    const offRecordingStarted = (window as any).backend.onRecordingStarted((_ev: any, data: any) => {
+      const startedAtMs = typeof data?.startedAtMs === 'number' ? data.startedAtMs : Date.now()
+      recordingStartRef.current = startedAtMs
+      pauseStartRef.current = null
+      pausedMsRef.current = 0
+      setElapsedSeconds(0)
+    })
+
     const offSummary = (window as any).backend.onSummary((_ev: any, data: any) => {
       setStatus('summary-ready')
       setStatusDetail('summary ready')
@@ -168,6 +183,8 @@ function App() {
       offTranscript()
       offTranscriptPartial()
       offTranscriptionStatus()
+      offRecordingReady()
+      offRecordingStarted()
       offSummary()
       offSummaryStream()
       offSummaryStatus()
@@ -228,13 +245,17 @@ function App() {
     setTranscriptionState('idle')
     setSummarizationState('idle')
     setSessionDir(null)
-    recordingStartRef.current = Date.now()
+    recordingStartRef.current = null
     pauseStartRef.current = null
     pausedMsRef.current = 0
     setElapsedSeconds(0)
     setRunning(true)
     setAudioDeleteMessage('')
-    ;(window as any).backend.start({ deviceIndex: selectedDevice, loopbackDeviceIndex: selectedLoopback, model })
+    ;(window as any).backend.start({
+      deviceIndex: selectedDevice,
+      loopbackDeviceIndex: selectedLoopback ?? undefined,
+      model,
+    })
   }
 
   const onStop = () => {
@@ -278,6 +299,26 @@ function App() {
     navigator.clipboard.writeText(text).catch((err) => {
       console.error('copy to clipboard failed', err)
     })
+  }
+
+  const onProcessRecordingFile = async () => {
+    if (processingRecordingFile) return
+    setProcessingRecordingFile(true)
+    setStatus('transcribing')
+    setStatusDetail('processing uploaded recording...')
+    try {
+      const res = await (window as any).backend.processRecording()
+      if (!res?.ok) {
+        setStatus('transcription-error')
+        setStatusDetail(res?.error || 'failed to process recording')
+      }
+    } catch (e) {
+      console.error('processRecording failed', e)
+      setStatus('transcription-error')
+      setStatusDetail('Failed to start transcription')
+    } finally {
+      setProcessingRecordingFile(false)
+    }
   }
 
   const canPause = running && (recordingState === 'running' || recordingState === 'paused')
@@ -493,7 +534,6 @@ function App() {
                 <input
                   value={sessionSubject}
                   onChange={(e) => setSessionSubject(e.target.value)}
-                  placeholder="e.g. Study plan check-in"
                   style={{ width: '100%' }}
                 />
               </label>
@@ -508,7 +548,6 @@ function App() {
                 <input
                   value={studentId}
                   onChange={(e) => setStudentId(e.target.value)}
-                  placeholder="e.g. 20231234"
                   style={{ width: '100%' }}
                 />
               </label>
@@ -517,7 +556,6 @@ function App() {
                 <input
                   value={studentName}
                   onChange={(e) => setStudentName(e.target.value)}
-                  placeholder="e.g. Kim Minji"
                   style={{ width: '100%' }}
                 />
               </label>
@@ -526,7 +564,6 @@ function App() {
                 <input
                   value={coachInitials}
                   onChange={(e) => setCoachInitials(e.target.value)}
-                  placeholder="e.g. JS"
                   style={{ width: '100%' }}
                 />
               </label>
@@ -579,7 +616,7 @@ function App() {
           <div className="control-row" style={{ marginBottom: 6 }}>
             <button
               onClick={onPrimaryToggle}
-              disabled={setupState !== 'done' || (running && !canPause)}
+              disabled={setupState !== 'done' || !recorderReady || (running && !canPause)}
               title={primaryActionLabel}
               aria-label={primaryActionLabel}
               style={{
@@ -589,12 +626,12 @@ function App() {
                 border: '1px solid #2b2b2b',
                 background: '#151515',
                 color: primaryActionColor,
-                cursor: setupState !== 'done' || (running && !canPause) ? 'not-allowed' : 'pointer',
+                cursor: setupState !== 'done' || !recorderReady || (running && !canPause) ? 'not-allowed' : 'pointer',
                 display: 'inline-flex',
                 alignItems: 'center',
                 justifyContent: 'center',
                 padding: 0,
-                opacity: setupState !== 'done' || (running && !canPause) ? 0.5 : 1,
+                opacity: setupState !== 'done' || !recorderReady || (running && !canPause) ? 0.5 : 1,
               }}
             >
               {primaryActionIcon}
@@ -646,10 +683,15 @@ function App() {
       <div className="output-columns">
         <div className="output-panel">
           <h3>Transcript</h3>
-          <button onClick={() => copyToClipboard(transcript)} disabled={!transcript} style={{ marginBottom: 8 }}>
-            Copy transcript
-          </button>
-          <div style={{ whiteSpace: 'pre-wrap', background: '#151515', color: '#f1f1f1', padding: 10, minHeight: 160, border: '1px solid #2b2b2b', borderRadius: 6 }}>{transcript || '(empty)'}</div>
+          <div style={{ marginBottom: 8, display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+            <button onClick={() => copyToClipboard(transcript)} disabled={!transcript}>
+              Copy transcript
+            </button>
+            <button onClick={onProcessRecordingFile} disabled={processingRecordingFile || running}>
+              {processingRecordingFile ? 'Processing...' : 'Process recording file'}
+            </button>
+          </div>
+          <div className="output-panel__body output-panel__body--scrollable">{transcript || '(empty)'}</div>
         </div>
 
         <div className="output-panel">
@@ -657,7 +699,7 @@ function App() {
           <button onClick={() => copyToClipboard(summaryWithMeta)} disabled={!summary} style={{ marginBottom: 8 }}>
             Copy summary
           </button>
-          <div style={{ whiteSpace: 'pre-wrap', background: '#151515', color: '#f1f1f1', padding: 10, minHeight: 160, border: '1px solid #2b2b2b', borderRadius: 6 }}>{summaryWithMeta || '(empty)'}</div>
+          <div className="output-panel__body">{summaryWithMeta || '(empty)'}</div>
         </div>
 
         <div className="output-panel">

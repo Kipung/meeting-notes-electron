@@ -71,14 +71,28 @@ def max_tokens_from_env(default: int) -> int:
 
 DEFAULT_PROMPT = (
     "You are an assistant that summarizes meeting transcripts.\n"
-    "Produce a concise summary in 5-7 sentences, and then list 3-6 action items if present.\n"
+    "Produce a concise summary in 5-7 sentences, grounding every sentence in the transcript text.\n"
+    "For summary, it should be a clean looking paragraph, no weird punctuation or line breaks.\n"
+    "After the summary, include an 'Action Items:' section only when the transcript clearly supports them.\n"
+    "Limit the section to at most five tasks, each introduced with a bullet point that starts with '-' and stays on its own line.\n"
+    "Only report a task if it is directly supported by something that happened in the transcript or summary; if no real follow-up is required, write 'Action Items: none.'\n"
+    "When you do list actions, mention the topic or person from the transcript that justifies that task so it is clearly traceable.\n"
 )
+SUMMARY_EXPANSION_SUFFIX = (
+    "\nIf the paragraph still has fewer than five sentences, rewrite it so the summary paragraph contains 5-7 sentences, "
+    "adding more detail from the transcript while keeping the Action Items section as instructed."
+)
+EXPANDED_SUMMARY_PROMPT = DEFAULT_PROMPT + SUMMARY_EXPANSION_SUFFIX
+MIN_SUMMARY_SENTENCES = 5
+ACTION_ITEMS_MARKER = "Action Items:"
+SENTENCE_SPLIT_RE = re.compile(r"[^.!?]+[.!?]*")
 
 FOLLOWUP_PROMPT = (
     "You are an assistant that drafts a warm, professional follow-up email after a student support session.\n"
     "Use the summary below as the only source of truth.\n"
     "Write in a warm, supportive tone.\n"
-    "If a student name is provided, use it in the greeting.\n"
+    "If a student name is provided, use it exactly once in the greeting and do not invent any other names.\n"
+    "If no student name is supplied, do not introduce or refer to any proper names; stay name-agnostic and use a generic greeting (e.g., 'Hello').\n"
     "Include a Subject line, then a blank line, then the email body.\n"
     "If the summary includes action items, include them under an 'Action items:' section.\n"
     "Do not add extra notes, disclaimers, or meta commentary.\n"
@@ -92,6 +106,19 @@ def clean_followup_email(text: str) -> str:
     cleaned = text.strip()
     cleaned = FOLLOWUP_NOTES_RE.sub("", cleaned).strip()
     return cleaned
+
+
+def extract_summary_body(text: str) -> str:
+    idx = text.find(ACTION_ITEMS_MARKER)
+    return text[:idx] if idx != -1 else text
+
+
+def count_summary_sentences(text: str) -> int:
+    body = extract_summary_body(text).strip()
+    if not body:
+        return 0
+    matches = SENTENCE_SPLIT_RE.findall(body)
+    return sum(1 for match in matches if match.strip())
 
 
 def summarize_with_llm(
@@ -211,16 +238,16 @@ class SummarizerDaemon:
             except Exception as e:
                 self.send({"event": "error", "msg": f"failed to load model: {e}"})
 
-    def summarize(self, text: str, out_path: Optional[str], chunk_words: int):
+    def summarize(self, text: str, out_path: Optional[str], chunk_words: int, context: Optional[dict] = None):
         with self.lock:
             if not self.client:
                 self.send({"event": "error", "msg": "model not loaded", "out": out_path})
                 return
-            self.send({"event": "summary_start", "out": out_path})
+            self.send({"event": "summary_start", "out": out_path, "context": context})
             word_count = count_words(text)
             if word_count < self.min_words:
                 msg = f"transcript too short ({word_count} words); skipping summary"
-                self.send({"event": "progress", "msg": msg})
+                self.send({"event": "progress", "msg": msg, "context": context})
                 summary = "Not enough content to summarize.\nAction Items: none."
                 if out_path:
                     try:
@@ -228,21 +255,30 @@ class SummarizerDaemon:
                         with open(out_path, "w", encoding="utf-8") as f:
                             f.write(summary)
                     except Exception as e:
-                        self.send({"event": "error", "msg": f"failed to write summary: {e}", "out": out_path})
+                        self.send({"event": "error", "msg": f"failed to write summary: {e}", "out": out_path, "context": context})
                         return
-                self.send({"event": "done", "out": out_path, "text": summary, "secs": 0})
+                self.send({"event": "done", "out": out_path, "text": summary, "secs": 0, "context": context})
                 return
             start = time.time()
             try:
                 summary = summarize_direct(
                     self.client,
                     text,
-                    on_progress=lambda msg: self.send({"event": "progress", "msg": msg}),
-                    on_stream=lambda delta: self.send({"event": "summary_delta", "text": delta, "out": out_path}),
+                    on_progress=lambda msg: self.send({"event": "progress", "msg": msg, "context": context}),
+                    on_stream=lambda delta: self.send({"event": "summary_delta", "text": delta, "out": out_path, "context": context}),
                 )
             except Exception as e:
-                self.send({"event": "error", "msg": f"summarization error: {e}", "out": out_path})
+                self.send({"event": "error", "msg": f"summarization error: {e}", "out": out_path, "context": context})
                 return
+            sentence_count = count_summary_sentences(summary)
+            if sentence_count < MIN_SUMMARY_SENTENCES:
+                self.send({"event": "progress", "msg": "regenerating summary to reach 5-7 sentences", "context": context})
+                try:
+                    expanded = summarize_with_llm(self.client, text, EXPANDED_SUMMARY_PROMPT, max_tokens=512)
+                    if expanded:
+                        summary = expanded
+                except Exception as e:
+                    self.send({"event": "progress", "msg": f"summary extension failed: {e}", "context": context})
             dur = time.time() - start
             if out_path:
                 try:
@@ -250,9 +286,9 @@ class SummarizerDaemon:
                     with open(out_path, "w", encoding="utf-8") as f:
                         f.write(summary)
                 except Exception as e:
-                    self.send({"event": "error", "msg": f"failed to write summary: {e}", "out": out_path})
+                    self.send({"event": "error", "msg": f"failed to write summary: {e}", "out": out_path, "context": context})
                     return
-            self.send({"event": "done", "out": out_path, "text": summary, "secs": dur})
+            self.send({"event": "done", "out": out_path, "text": summary, "secs": dur, "context": context})
 
     def followup_email(
         self,

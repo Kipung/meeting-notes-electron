@@ -12,7 +12,7 @@ const VITE_DEV_SERVER_URL = process.env["VITE_DEV_SERVER_URL"];
 const MAIN_DIST = path.join(process.env.APP_ROOT, "dist-electron");
 const RENDERER_DIST = path.join(process.env.APP_ROOT, "dist");
 process.env.VITE_PUBLIC = VITE_DEV_SERVER_URL ? path.join(process.env.APP_ROOT, "public") : RENDERER_DIST;
-const DEFAULT_SUMMARY_MODEL_URL = "https://huggingface.co/unsloth/Llama-3.2-3B-Instruct-GGUF/resolve/main/Llama-3.2-3B-Instruct-Q4_K_M.gguf";
+const DEFAULT_SUMMARY_MODEL_NAME = "Llama-3.2-1B-Instruct-Q6_K.gguf";
 let win;
 let backendProcess = null;
 let currentSessionDir = null;
@@ -25,6 +25,20 @@ let setupState = "idle";
 let setupPromise = null;
 let downloadedSummaryModelPath = null;
 const followUpRequests = /* @__PURE__ */ new Map();
+const CHUNK_WORD_THRESHOLD = 600;
+let chunkQueue = [];
+let chunkProcessing = false;
+let nextChunkId = 0;
+let chunkSummaries = /* @__PURE__ */ new Map();
+let lastTranscriptOffset = 0;
+let transcriptBuffer = "";
+let chunkSummariesEnabled = false;
+let finalSummaryPending = null;
+let finalSummaryRunning = false;
+let chunkSummariesSession = null;
+let pendingFinalSummarySession = null;
+let fileTranscribeProcess = null;
+let fileTranscribeStdoutBuf = "";
 function getUserDataRoot() {
   return app.getPath("userData");
 }
@@ -159,7 +173,197 @@ function getPythonEnv() {
       env.DYLD_LIBRARY_PATH = [libDir, env.DYLD_LIBRARY_PATH || ""].filter(Boolean).join(path.delimiter);
     }
   }
+  env.GGML_LOG_LEVEL = env.GGML_LOG_LEVEL || "0";
+  env.LLAMA_CPP_LOG_LEVEL = env.LLAMA_CPP_LOG_LEVEL || "0";
+  env.TORCH_CPP_LOG_LEVEL = env.TORCH_CPP_LOG_LEVEL || "0";
   return env;
+}
+function countWords(text) {
+  const trimmed = text.trim();
+  if (!trimmed) return 0;
+  return trimmed.split(/\s+/).filter(Boolean).length;
+}
+function resetChunkSummariesState() {
+  chunkQueue = [];
+  chunkProcessing = false;
+  nextChunkId = 0;
+  chunkSummaries = /* @__PURE__ */ new Map();
+  lastTranscriptOffset = 0;
+  transcriptBuffer = "";
+  chunkSummariesEnabled = false;
+  chunkSummariesSession = null;
+  finalSummaryPending = null;
+  finalSummaryRunning = false;
+  pendingFinalSummarySession = null;
+}
+function queueChunkSummarization(text) {
+  if (!chunkSummariesEnabled || !summarizerProcess) return;
+  const chunkText = text.trim();
+  if (!chunkText) return;
+  chunkQueue.push({ id: nextChunkId++, text: chunkText, sessionDir: currentSessionDir });
+  processChunkQueue();
+}
+function processChunkQueue() {
+  if (chunkProcessing || !summarizerProcess || chunkQueue.length === 0) return;
+  const task = chunkQueue.shift();
+  chunkProcessing = true;
+  const payload = {
+    cmd: "summarize",
+    text: task.text,
+    out: null,
+    chunk_words: CHUNK_WORD_THRESHOLD,
+    context: { type: "chunk", id: task.id, sessionDir: task.sessionDir }
+  };
+  const ok = sendProcessCommand(summarizerProcess, "summarizer", JSON.stringify(payload) + "\n");
+  if (!ok) {
+    chunkProcessing = false;
+    chunkQueue.unshift(task);
+    console.error("[summarizer chunk] failed to send chunk summarization command");
+    maybeStartPendingFinalSummary();
+  }
+}
+function processTranscriptPartialText(fullText) {
+  if (!chunkSummariesEnabled) return;
+  const text = fullText || "";
+  transcriptBuffer = text;
+  const unprocessed = transcriptBuffer.slice(lastTranscriptOffset);
+  if (!unprocessed.trim()) return;
+  if (countWords(unprocessed) >= CHUNK_WORD_THRESHOLD) {
+    queueChunkSummarization(unprocessed);
+    lastTranscriptOffset = transcriptBuffer.length;
+  }
+}
+function maybeStartPendingFinalSummary() {
+  if (!finalSummaryPending) return;
+  if (chunkProcessing || chunkQueue.length > 0) return;
+  const text = finalSummaryPending;
+  finalSummaryPending = null;
+  startFinalSummary(text);
+}
+function requestFinalSummary(fullText) {
+  if (!currentSessionDir) {
+    console.error("cannot request final summary without a session directory");
+    return;
+  }
+  finalSummaryPending = fullText;
+  chunkSummariesEnabled = false;
+  pendingFinalSummarySession = currentSessionDir;
+  maybeStartPendingFinalSummary();
+}
+function startFinalSummary(fullText) {
+  if (!summarizerProcess || finalSummaryRunning) return;
+  finalSummaryRunning = true;
+  const orderedSummaries = Array.from(chunkSummaries.entries()).sort((a, b) => a[0] - b[0]).map(([, summary]) => summary).filter(Boolean);
+  const leftoverStart = Math.min(lastTranscriptOffset, fullText.length);
+  const leftover = fullText.slice(leftoverStart).trim();
+  const segments = [];
+  if (orderedSummaries.length > 0) {
+    segments.push(`Previous chunk summaries:
+${orderedSummaries.join("\n\n")}`);
+  }
+  if (leftover) {
+    segments.push(`Remaining transcript:
+${leftover}`);
+  }
+  const inputText = segments.length > 0 ? segments.join("\n\n") : fullText;
+  const summarySessionDir = pendingFinalSummarySession || currentSessionDir;
+  if (!summarySessionDir) {
+    console.error("final summary requested with no session directory");
+    finalSummaryRunning = false;
+    return;
+  }
+  const summaryOut = path.join(summarySessionDir, "summary.txt");
+  const payload = {
+    cmd: "summarize",
+    text: inputText,
+    out: summaryOut,
+    chunk_words: CHUNK_WORD_THRESHOLD,
+    context: { type: "final", sessionDir: summarySessionDir }
+  };
+  const ok = sendProcessCommand(summarizerProcess, "summarizer", JSON.stringify(payload) + "\n");
+  if (!ok) {
+    finalSummaryRunning = false;
+    console.error("[summarizer final] failed to send summary command");
+  }
+}
+function handleChunkSummarizerEvent(obj, context) {
+  if (context.type !== "chunk") return;
+  if (!context.sessionDir || context.sessionDir !== chunkSummariesSession) return;
+  const chunkId = typeof context.id === "number" ? context.id : null;
+  if (obj.event === "progress") {
+    return;
+  }
+  if (obj.event === "summary_delta") {
+    return;
+  }
+  if (obj.event === "done" || obj.event === "error") {
+    chunkProcessing = false;
+    if (obj.event === "done" && chunkId !== null) {
+      const summaryText = (obj.text || "").trim();
+      if (summaryText) chunkSummaries.set(chunkId, summaryText);
+    }
+    if (obj.event === "error") {
+      console.error(`[summarizer chunk ${chunkId}] error`, obj.msg);
+    }
+    processChunkQueue();
+    maybeStartPendingFinalSummary();
+  }
+}
+function formatActionItemsForDisplay(text) {
+  const marker = "Action Items:";
+  const idx = text.indexOf(marker);
+  if (idx === -1) return text;
+  const before = text.slice(0, idx);
+  const remainder = text.slice(idx + marker.length);
+  const trimmed = remainder.trim();
+  if (!trimmed) return `${before}${marker}`;
+  const normalizedNone = trimmed.replace(/\.*$/, "").trim().toLowerCase();
+  if (normalizedNone === "none") {
+    return `${before}${marker} ${trimmed}`;
+  }
+  const items = parseActionItems(trimmed);
+  if (items.length === 0) {
+    return `${before}${marker}
+${trimmed}`;
+  }
+  const limitedItems = items.slice(0, 5);
+  const bullets = limitedItems.map((item) => `- ${item}`);
+  return `${before}${marker}
+${bullets.join("\n")}`;
+}
+function splitActionSentences(text) {
+  const normalized = text.replace(/\s+/g, " ").trim();
+  if (!normalized) return [];
+  const matches = normalized.match(/[^.!?]+[.!?]*/g) || [];
+  return matches.map((segment) => segment.trim()).filter(Boolean);
+}
+function stripLeadingBullet(line) {
+  return line.replace(/^[•\-\*]\s*/, "").trim();
+}
+function parseActionItems(raw) {
+  const normalized = raw.replace(/\r/g, "").trim();
+  if (!normalized) return [];
+  const lines = normalized.split(/\n+/).map((line) => line.trim()).filter(Boolean);
+  if (lines.length > 1) {
+    return lines.map(stripLeadingBullet);
+  }
+  const singleLine = lines[0];
+  const singleBulletMatch = singleLine.match(/^[•\-\*]\s*(.+)$/);
+  if (singleBulletMatch) {
+    return [singleBulletMatch[1].trim()];
+  }
+  const numberedParts = singleLine.split(/(?=\d+\.)/g).map((part) => part.replace(/^\d+\.\s*/, "").trim()).filter(Boolean);
+  if (numberedParts.length > 1) {
+    return numberedParts;
+  }
+  const sentences = splitActionSentences(singleLine);
+  if (sentences.length > 1) {
+    return sentences;
+  }
+  if (sentences.length === 1) {
+    return sentences;
+  }
+  return [singleLine];
 }
 function sendBootstrapStatus(state, message, percent) {
   try {
@@ -317,7 +521,6 @@ async function runSetupScript(whisperModel, whisperDir) {
             sendBootstrapStatus("error", obj.message || "setup failed");
           }
         } catch {
-          console.log("[setup]", line);
         }
       }
     });
@@ -352,10 +555,18 @@ function resolveSummaryModelPath() {
   const override = process.env["SUMMODEL"];
   if (override && override.trim()) return override;
   if (downloadedSummaryModelPath && fs.existsSync(downloadedSummaryModelPath)) return downloadedSummaryModelPath;
+  const bundledCandidates = [
+    path.join(getModelsRoot(), DEFAULT_SUMMARY_MODEL_NAME),
+    path.join(getPackagedModelsRoot(), DEFAULT_SUMMARY_MODEL_NAME),
+    path.join(process.env.APP_ROOT, "models", DEFAULT_SUMMARY_MODEL_NAME)
+  ];
+  for (const candidate of bundledCandidates) {
+    if (fs.existsSync(candidate)) return candidate;
+  }
   const candidates = [getModelsRoot(), getPackagedModelsRoot(), path.join(process.env.APP_ROOT, "models")];
   for (const modelsDir of candidates) {
     if (!fs.existsSync(modelsDir)) continue;
-    const preferred = path.join(modelsDir, "Llama-3.2-3B-Instruct-Q4_K_M.gguf");
+    const preferred = path.join(modelsDir, DEFAULT_SUMMARY_MODEL_NAME);
     if (fs.existsSync(preferred)) return preferred;
     try {
       const entries = fs.readdirSync(modelsDir, { withFileTypes: true });
@@ -386,8 +597,13 @@ async function ensureSummaryModel() {
     throw new Error("summary model missing in installer");
   }
   const url = process.env["SUMMODEL_URL"] || DEFAULT_SUMMARY_MODEL_URL;
+  if (!url) {
+    throw new Error(
+      `summary model missing; place ${DEFAULT_SUMMARY_MODEL_NAME} under ${path.join(process.env.APP_ROOT, "models")} or set SUMMODEL_URL to download it`
+    );
+  }
   const modelsDir = getModelsRoot();
-  let targetName = "Llama-3.2-3B-Instruct-Q4_K_M.gguf";
+  let targetName = DEFAULT_SUMMARY_MODEL_NAME;
   try {
     const parsed = new URL(url);
     const base = path.basename(parsed.pathname);
@@ -457,9 +673,23 @@ function startSummarizerIfNeeded(modelPath) {
       if (!line) continue;
       try {
         const obj = JSON.parse(line);
+        const context = obj.context;
+        const contextSessionDir = (context == null ? void 0 : context.sessionDir) ?? null;
+        if ((context == null ? void 0 : context.type) === "chunk") {
+          handleChunkSummarizerEvent(obj, context);
+          continue;
+        }
+        const isFinalContext = (context == null ? void 0 : context.type) === "final";
+        if (isFinalContext && (!pendingFinalSummarySession || contextSessionDir !== pendingFinalSummarySession)) {
+          continue;
+        }
+        const summarySessionDir = contextSessionDir || pendingFinalSummarySession || currentSessionDir;
+        if (isFinalContext && (obj.event === "done" || obj.event === "error")) {
+          finalSummaryRunning = false;
+        }
         if (obj.event === "summary_start") {
           try {
-            win == null ? void 0 : win.webContents.send("summary-stream", { sessionDir: currentSessionDir, reset: true });
+            win == null ? void 0 : win.webContents.send("summary-stream", { sessionDir: summarySessionDir, reset: true });
           } catch (e) {
             console.error("failed to send summary-stream reset", e);
           }
@@ -467,23 +697,26 @@ function startSummarizerIfNeeded(modelPath) {
           const delta = obj.text || "";
           if (delta) {
             try {
-              win == null ? void 0 : win.webContents.send("summary-stream", { sessionDir: currentSessionDir, delta });
+              win == null ? void 0 : win.webContents.send("summary-stream", { sessionDir: summarySessionDir, delta });
             } catch (e) {
               console.error("failed to send summary-stream delta", e);
             }
           }
         } else if (obj.event === "done") {
           const summaryOut = obj.out;
-          const summaryText = obj.text || "";
+          const summaryText = formatActionItemsForDisplay(obj.text || "");
           try {
-            win == null ? void 0 : win.webContents.send("summary-ready", { sessionDir: currentSessionDir, summaryPath: summaryOut, text: summaryText });
+            win == null ? void 0 : win.webContents.send("summary-ready", { sessionDir: summarySessionDir, summaryPath: summaryOut, text: summaryText });
           } catch (e) {
             console.error("failed to send summary-ready", e);
           }
           try {
-            win == null ? void 0 : win.webContents.send("summary-status", { state: "done", sessionDir: currentSessionDir, message: "summary complete" });
+            win == null ? void 0 : win.webContents.send("summary-status", { state: "done", sessionDir: summarySessionDir, message: "summary complete" });
           } catch (e) {
             console.error("failed to send summary-status done", e);
+          }
+          if (isFinalContext) {
+            pendingFinalSummarySession = null;
           }
         } else if (obj.event === "followup_done") {
           const requestId = obj.id;
@@ -495,21 +728,22 @@ function startSummarizerIfNeeded(modelPath) {
           } else {
             console.warn("[summarizer] follow-up done with no request id", obj.id);
           }
-        } else if (obj.event === "loaded") {
-          console.log("[summarizer] loaded", obj.model);
         } else if (obj.event === "progress") {
-          console.log("[summarizer]", obj.msg);
+          if ((context == null ? void 0 : context.type) !== "final") continue;
           try {
-            win == null ? void 0 : win.webContents.send("summary-status", { state: "running", sessionDir: currentSessionDir, message: obj.msg || "summarizing" });
+            win == null ? void 0 : win.webContents.send("summary-status", { state: "running", sessionDir: summarySessionDir, message: obj.msg || "summarizing" });
           } catch (e) {
             console.error("failed to send summary-status running", e);
           }
         } else if (obj.event === "error") {
           console.error("[summarizer error]", obj.msg);
           try {
-            win == null ? void 0 : win.webContents.send("summary-status", { state: "error", sessionDir: currentSessionDir, message: obj.msg || "summary error" });
+            win == null ? void 0 : win.webContents.send("summary-status", { state: "error", sessionDir: summarySessionDir, message: obj.msg || "summary error" });
           } catch (e) {
             console.error("failed to send summary-status error", e);
+          }
+          if (isFinalContext) {
+            pendingFinalSummarySession = null;
           }
         } else if (obj.event === "followup_error") {
           const requestId = obj.id;
@@ -522,13 +756,13 @@ function startSummarizerIfNeeded(modelPath) {
             console.warn("[summarizer] follow-up error with no request id", obj.id, obj.msg);
           }
         }
-      } catch (e) {
-        console.error("failed to parse summarizer stdout line", e, line);
+      } catch {
       }
     }
   });
   else console.error("[summarizer] stdout not available");
-  if (summarizerProcess.stderr) summarizerProcess.stderr.on("data", (d) => console.error("[summarizer err]", d.toString().trim()));
+  if (summarizerProcess.stderr) summarizerProcess.stderr.on("data", () => {
+  });
   else console.error("[summarizer] stderr not available");
   summarizerProcess.on("error", (err) => {
     console.error("[summarizer spawn error]", err);
@@ -567,16 +801,13 @@ function handleTranscriptReady(outPath, text) {
       throw new Error("summary model not found");
     }
     startSummarizerIfNeeded(modelPath);
-    const summaryOut = path.join(currentSessionDir || "", "summary.txt");
     try {
       win == null ? void 0 : win.webContents.send("summary-status", { state: "starting", sessionDir: currentSessionDir, message: "starting summarization" });
     } catch (e) {
       console.error("failed to send summary-status starting", e);
     }
     if (!summarizerProcess) throw new Error("summarizer not running");
-    if (!sendProcessCommand(summarizerProcess, "summarizer", JSON.stringify({ cmd: "summarize", file: outPath, out: summaryOut }) + "\n")) {
-      throw new Error("summarizer stdin not available");
-    }
+    requestFinalSummary(text);
   } catch (e) {
     console.error("failed to start summarizer", e);
     try {
@@ -605,6 +836,26 @@ function handleRecordOutput(data) {
         } catch (e) {
           console.error("failed to send transcript-partial", e);
         }
+        const partialText = obj.full_text || obj.fullText || obj.text || "";
+        processTranscriptPartialText(partialText);
+        continue;
+      }
+      if (obj.event === "started") {
+        const startedAt = typeof obj.started_at === "number" ? obj.started_at : typeof obj.startedAt === "number" ? obj.startedAt : null;
+        const startedAtMs = startedAt ? Math.round(startedAt * 1e3) : Date.now();
+        try {
+          win == null ? void 0 : win.webContents.send("recording-started", { sessionDir: currentSessionDir, startedAtMs });
+        } catch (e) {
+          console.error("failed to send recording-started", e);
+        }
+        continue;
+      }
+      if (obj.event === "ready") {
+        try {
+          win == null ? void 0 : win.webContents.send("recording-ready", { ready: true });
+        } catch (e) {
+          console.error("failed to send recording-ready", e);
+        }
         continue;
       }
       if (obj.event === "done" && obj.out) {
@@ -614,8 +865,36 @@ function handleRecordOutput(data) {
         continue;
       }
     } catch {
+      continue;
     }
-    console.log("[backend]", line);
+  }
+}
+function handleFileTranscribeEvent(obj) {
+  const sessionDir = currentSessionDir;
+  if (!sessionDir) return;
+  if (obj.event === "started") {
+    try {
+      win == null ? void 0 : win.webContents.send("transcription-status", {
+        state: "running",
+        sessionDir,
+        message: "transcribing uploaded recording"
+      });
+    } catch (e) {
+      console.error("failed to send transcription-status running", e);
+    }
+    return;
+  }
+  if (obj.event === "done" && obj.out) {
+    handleTranscriptReady(obj.out, obj.text || "");
+    return;
+  }
+  if (obj.event === "error") {
+    const message = obj.msg || "transcription failed";
+    try {
+      win == null ? void 0 : win.webContents.send("transcription-status", { state: "error", sessionDir, message });
+    } catch (e) {
+      console.error("failed to send transcription-status error", e);
+    }
   }
 }
 function makeSessionDir() {
@@ -634,6 +913,11 @@ async function startBackend() {
   const ready = await ensureDependencies();
   if (!ready) return;
   recordStdoutBuf = "";
+  try {
+    win == null ? void 0 : win.webContents.send("recording-ready", { ready: false });
+  } catch (e) {
+    console.error("failed to send recording-ready false", e);
+  }
   const scriptPath = path.join(getBackendRoot(), "record_and_transcribe.py");
   const args = [scriptPath, "--model", currentModelName];
   startSummarizerIfNeeded(resolveSummaryModelPath());
@@ -660,7 +944,99 @@ async function startBackend() {
   backendProcess.on("exit", (code) => {
     console.log("[backend] exited with code", code);
     backendProcess = null;
+    try {
+      win == null ? void 0 : win.webContents.send("recording-ready", { ready: false });
+    } catch (e) {
+      console.error("failed to send recording-ready false", e);
+    }
   });
+}
+async function processUploadedRecording() {
+  if (fileTranscribeProcess) {
+    return { ok: false, error: "Already processing a recording" };
+  }
+  if (!win) {
+    return { ok: false, error: "window not ready" };
+  }
+  const ready = await ensureDependencies();
+  if (!ready) {
+    return { ok: false, error: "setup not ready" };
+  }
+  const dialogResult = await dialog.showOpenDialog(win, {
+    title: "Select a recording",
+    properties: ["openFile"],
+    filters: [
+      { name: "Audio", extensions: ["wav", "mp3", "m4a", "flac", "aac", "ogg", "webm"] },
+      { name: "All files", extensions: ["*"] }
+    ]
+  });
+  if (dialogResult.canceled || dialogResult.filePaths.length === 0) {
+    return { ok: false, error: "no file selected" };
+  }
+  const audioPath = dialogResult.filePaths[0];
+  resetChunkSummariesState();
+  const sessionDir = makeSessionDir();
+  currentSessionDir = sessionDir;
+  chunkSummariesSession = sessionDir;
+  try {
+    win == null ? void 0 : win.webContents.send("session-started", { sessionDir, sessionsRoot: getSessionsRoot() });
+  } catch (e) {
+    console.error("failed to send session-started for file upload", e);
+  }
+  const destAudio = path.join(sessionDir, path.basename(audioPath));
+  try {
+    fs.copyFileSync(audioPath, destAudio);
+  } catch (e) {
+    return { ok: false, error: `failed to copy recording: ${e instanceof Error ? e.message : String(e)}` };
+  }
+  try {
+    win == null ? void 0 : win.webContents.send("transcription-status", { state: "running", sessionDir, message: "preparing transcription" });
+  } catch (e) {
+    console.error("failed to send transcription-status running for upload", e);
+  }
+  const transcriptPath = path.join(sessionDir, "transcript.txt");
+  const summaryModelPath = resolveSummaryModelPath();
+  if (!summaryModelPath) {
+    return { ok: false, error: "summary model not found" };
+  }
+  startSummarizerIfNeeded(summaryModelPath);
+  const script = path.join(getBackendRoot(), "transcribe_file.py");
+  const args = [script, "--model", currentModelName, "--audio", destAudio, "--transcript-out", transcriptPath];
+  fileTranscribeStdoutBuf = "";
+  fileTranscribeProcess = spawn(getPythonCommand(), args, {
+    stdio: ["ignore", "pipe", "pipe"],
+    env: getPythonEnv()
+  });
+  if (fileTranscribeProcess.stdout) {
+    fileTranscribeProcess.stdout.on("data", (data) => {
+      fileTranscribeStdoutBuf += data.toString();
+      const parts = fileTranscribeStdoutBuf.split("\n");
+      fileTranscribeStdoutBuf = parts.pop() || "";
+      for (const rawLine of parts) {
+        const line = rawLine.trim();
+        if (!line) continue;
+        try {
+          const obj = JSON.parse(line);
+          handleFileTranscribeEvent(obj);
+        } catch {
+          continue;
+        }
+      }
+    });
+  } else {
+    console.error("[file-transcribe] stdout not available");
+  }
+  if (fileTranscribeProcess.stderr) {
+    fileTranscribeProcess.stderr.on("data", (data) => {
+      console.error("[file-transcribe err]", data.toString().trim());
+    });
+  } else {
+    console.error("[file-transcribe] stderr not available");
+  }
+  fileTranscribeProcess.on("exit", () => {
+    fileTranscribeProcess = null;
+  });
+  return { ok: true };
 }
 function stopBackend() {
   if (!backendProcess) {
@@ -690,11 +1066,13 @@ function resumeBackend() {
 ipcMain.on("backend-start", (_evt, opts = {}) => {
   void (async () => {
     console.log("[ipc] backend-start", opts);
+    resetChunkSummariesState();
     if (opts && opts.model) currentModelName = opts.model;
     await startBackend();
     if (!backendProcess) return;
     const sessionDir = makeSessionDir();
     currentSessionDir = sessionDir;
+    chunkSummariesSession = sessionDir;
     const outWav = path.join(sessionDir, "audio.wav");
     const outTranscript = path.join(sessionDir, "transcript.txt");
     console.log("[backend] sessionDir=", sessionDir);
@@ -764,6 +1142,14 @@ ipcMain.handle("choose-sessions-root", async () => {
     return null;
   }
 });
+ipcMain.handle("process-recording", async () => {
+  try {
+    return await processUploadedRecording();
+  } catch (e) {
+    console.error("[process-recording] failed", e);
+    return { ok: false, error: e instanceof Error ? e.message : "failed to process recording" };
+  }
+});
 ipcMain.handle("generate-followup-email", async (_evt, payload = {}) => {
   const summary = typeof payload.summary === "string" ? payload.summary.trim() : "";
   if (!summary) return { ok: false, error: "summary is required" };
@@ -830,7 +1216,7 @@ function createWindow() {
   });
   win.webContents.on("did-finish-load", () => {
     win == null ? void 0 : win.webContents.send("main-process-message", (/* @__PURE__ */ new Date()).toLocaleString());
-    void ensureDependencies();
+    void startBackend();
   });
   if (VITE_DEV_SERVER_URL) {
     win.loadURL(VITE_DEV_SERVER_URL);
