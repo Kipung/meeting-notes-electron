@@ -26,4 +26,5 @@ contextBridge.exposeInMainWorld('backend', {
   onSummaryStatus: (cb: (ev: any, data: any) => void) => onChannel('summary-status', cb),
   onSummaryStream: (cb: (ev: any, data: any) => void) => onChannel('summary-stream', cb),
   onBootstrapStatus: (cb: (ev: any, data: any) => void) => onChannel('bootstrap-status', cb),
+  processRecording: () => ipcRenderer.invoke('process-recording'),
 })

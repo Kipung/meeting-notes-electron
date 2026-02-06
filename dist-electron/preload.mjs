@@ -23,5 +23,6 @@ electron.contextBridge.exposeInMainWorld("backend", {
   onSummary: (cb) => onChannel("summary-ready", cb),
   onSummaryStatus: (cb) => onChannel("summary-status", cb),
   onSummaryStream: (cb) => onChannel("summary-stream", cb),
-  onBootstrapStatus: (cb) => onChannel("bootstrap-status", cb)
+  onBootstrapStatus: (cb) => onChannel("bootstrap-status", cb),
+  processRecording: () => electron.ipcRenderer.invoke("process-recording")
 });

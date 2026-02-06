@@ -59,6 +59,7 @@ function App() {
   const [followUpInstructions, setFollowUpInstructions] = useState('')
   const [followUpGenerating, setFollowUpGenerating] = useState(false)
   const [followUpStatus, setFollowUpStatus] = useState('')
+  const [processingRecordingFile, setProcessingRecordingFile] = useState(false)
 
   const getElapsedSeconds = () => {
     if (!recordingStartRef.current) return 0
@@ -284,6 +285,26 @@ function App() {
     navigator.clipboard.writeText(text).catch((err) => {
       console.error('copy to clipboard failed', err)
     })
+  }
+
+  const onProcessRecordingFile = async () => {
+    if (processingRecordingFile) return
+    setProcessingRecordingFile(true)
+    setStatus('transcribing')
+    setStatusDetail('processing uploaded recording...')
+    try {
+      const res = await (window as any).backend.processRecording()
+      if (!res?.ok) {
+        setStatus('transcription-error')
+        setStatusDetail(res?.error || 'failed to process recording')
+      }
+    } catch (e) {
+      console.error('processRecording failed', e)
+      setStatus('transcription-error')
+      setStatusDetail('Failed to start transcription')
+    } finally {
+      setProcessingRecordingFile(false)
+    }
   }
 
   const canPause = running && (recordingState === 'running' || recordingState === 'paused')
@@ -617,9 +638,14 @@ function App() {
       <div className="output-columns">
         <div className="output-panel">
           <h3>Transcript</h3>
-          <button onClick={() => copyToClipboard(transcript)} disabled={!transcript} style={{ marginBottom: 8 }}>
-            Copy transcript
-          </button>
+          <div style={{ marginBottom: 8, display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+            <button onClick={() => copyToClipboard(transcript)} disabled={!transcript}>
+              Copy transcript
+            </button>
+            <button onClick={onProcessRecordingFile} disabled={processingRecordingFile || running}>
+              {processingRecordingFile ? 'Processing...' : 'Process recording file'}
+            </button>
+          </div>
           <div className="output-panel__body output-panel__body--scrollable">{transcript || '(empty)'}</div>
         </div>
 

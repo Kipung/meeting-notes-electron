@@ -57,6 +57,8 @@ let finalSummaryPending: string | null = null
 let finalSummaryRunning = false
 let chunkSummariesSession: string | null = null
 let pendingFinalSummarySession: string | null = null
+let fileTranscribeProcess: ReturnType<typeof spawn> | null = null
+let fileTranscribeStdoutBuf = ''
 
 type AppSettings = {
   sessionsRoot?: string
@@ -983,6 +985,35 @@ function handleRecordOutput(data: Buffer) {
     }
 }
 
+function handleFileTranscribeEvent(obj: any) {
+  const sessionDir = currentSessionDir
+  if (!sessionDir) return
+  if (obj.event === 'started') {
+    try {
+      win?.webContents.send('transcription-status', {
+        state: 'running',
+        sessionDir,
+        message: 'transcribing uploaded recording',
+      })
+    } catch (e) {
+      console.error('failed to send transcription-status running', e)
+    }
+    return
+  }
+  if (obj.event === 'done' && obj.out) {
+    handleTranscriptReady(obj.out, obj.text || '')
+    return
+  }
+  if (obj.event === 'error') {
+    const message = obj.msg || 'transcription failed'
+    try {
+      win?.webContents.send('transcription-status', { state: 'error', sessionDir, message })
+    } catch (e) {
+      console.error('failed to send transcription-status error', e)
+    }
+  }
+}
+
 
 
 function makeSessionDir() {
@@ -1054,6 +1085,94 @@ async function startBackend() {
       console.error('failed to send recording-ready false', e)
     }
   })
+}
+
+async function processUploadedRecording(): Promise<{ ok: boolean; error?: string }> {
+  if (fileTranscribeProcess) {
+    return { ok: false, error: 'Already processing a recording' }
+  }
+  if (!win) {
+    return { ok: false, error: 'window not ready' }
+  }
+  const ready = await ensureDependencies()
+  if (!ready) {
+    return { ok: false, error: 'setup not ready' }
+  }
+  const dialogResult = await dialog.showOpenDialog(win!, {
+    title: 'Select a recording',
+    properties: ['openFile'],
+    filters: [
+      { name: 'Audio', extensions: ['wav', 'mp3', 'm4a', 'flac', 'aac', 'ogg', 'webm'] },
+      { name: 'All files', extensions: ['*'] },
+    ],
+  })
+  if (dialogResult.canceled || dialogResult.filePaths.length === 0) {
+    return { ok: false, error: 'no file selected' }
+  }
+  const audioPath = dialogResult.filePaths[0]
+  resetChunkSummariesState()
+  const sessionDir = makeSessionDir()
+  currentSessionDir = sessionDir
+  chunkSummariesSession = sessionDir
+  try {
+    win?.webContents.send('session-started', { sessionDir, sessionsRoot: getSessionsRoot() })
+  } catch (e) {
+    console.error('failed to send session-started for file upload', e)
+  }
+  const destAudio = path.join(sessionDir, path.basename(audioPath))
+  try {
+    fs.copyFileSync(audioPath, destAudio)
+  } catch (e) {
+    return { ok: false, error: `failed to copy recording: ${e instanceof Error ? e.message : String(e)}` }
+  }
+  try {
+    win?.webContents.send('transcription-status', { state: 'running', sessionDir, message: 'preparing transcription' })
+  } catch (e) {
+    console.error('failed to send transcription-status running for upload', e)
+  }
+  const transcriptPath = path.join(sessionDir, 'transcript.txt')
+  const summaryModelPath = resolveSummaryModelPath()
+  if (!summaryModelPath) {
+    return { ok: false, error: 'summary model not found' }
+  }
+  startSummarizerIfNeeded(summaryModelPath)
+  const script = path.join(getBackendRoot(), 'transcribe_file.py')
+  const args = [script, '--model', currentModelName, '--audio', destAudio, '--transcript-out', transcriptPath]
+  fileTranscribeStdoutBuf = ''
+  fileTranscribeProcess = spawn(getPythonCommand(), args, {
+    stdio: ['ignore', 'pipe', 'pipe'],
+    env: getPythonEnv(),
+  })
+  if (fileTranscribeProcess.stdout) {
+    fileTranscribeProcess.stdout.on('data', (data) => {
+      fileTranscribeStdoutBuf += data.toString()
+      const parts = fileTranscribeStdoutBuf.split('\n')
+      fileTranscribeStdoutBuf = parts.pop() || ''
+      for (const rawLine of parts) {
+        const line = rawLine.trim()
+        if (!line) continue
+        try {
+          const obj = JSON.parse(line)
+          handleFileTranscribeEvent(obj)
+        } catch {
+          continue
+        }
+      }
+    })
+  } else {
+    console.error('[file-transcribe] stdout not available')
+  }
+  if (fileTranscribeProcess.stderr) {
+    fileTranscribeProcess.stderr.on('data', (data) => {
+      console.error('[file-transcribe err]', data.toString().trim())
+    })
+  } else {
+    console.error('[file-transcribe] stderr not available')
+  }
+  fileTranscribeProcess.on('exit', () => {
+    fileTranscribeProcess = null
+  })
+  return { ok: true }
 }
 
 function stopBackend() {
@@ -1169,6 +1288,15 @@ ipcMain.handle('choose-sessions-root', async () => {
   } catch (e) {
     console.error('failed to choose sessions root', e)
     return null
+  }
+})
+
+ipcMain.handle('process-recording', async () => {
+  try {
+    return await processUploadedRecording()
+  } catch (e) {
+    console.error('[process-recording] failed', e)
+    return { ok: false, error: e instanceof Error ? e.message : 'failed to process recording' }
   }
 })
 

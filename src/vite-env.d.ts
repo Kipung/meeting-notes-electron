@@ -17,6 +17,7 @@ interface Window {
       temperature?: number
       maxTokens?: number
     }) => Promise<{ ok: boolean; text?: string; error?: string }>
+    processRecording: () => Promise<{ ok: boolean; error?: string }>
     onSession: (cb: (ev: any, data: any) => void) => () => void
     onTranscript: (cb: (ev: any, data: any) => void) => () => void
     onTranscriptionStatus: (cb: (ev: any, data: any) => void) => () => void
