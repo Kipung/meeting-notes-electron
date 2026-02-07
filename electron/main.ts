@@ -583,9 +583,10 @@ async function ensurePythonRuntime(): Promise<void> {
 async function runSetupScript(whisperModel: string, whisperDir: string): Promise<void> {
   const script = path.join(getBackendRoot(), 'setup.py')
   return new Promise((resolve, reject) => {
-    const proc = spawn(getPythonCommand(), [script, '--whisper-model', whisperModel, '--whisper-dir', whisperDir], {
+    const env = { ...getPythonEnv(), WHISPER_MODEL: whisperModel, WHISPER_DIR: whisperDir }
+    const proc = spawn(getPythonCommand(), [script], {
       stdio: ['ignore', 'pipe', 'pipe'],
-      env: getPythonEnv(),
+      env,
     })
     let buf = ''
     proc.stdout?.on('data', (data) => {
@@ -769,7 +770,8 @@ function startSummarizerIfNeeded(modelPath: string | null) {
   }
 
   const script = path.join(getBackendRoot(), 'summarizer_daemon.py')
-  summarizerProcess = spawn(getPythonCommand(), [script, '--model-path', modelPath], { stdio: ['pipe', 'pipe', 'pipe'], env: getPythonEnv() })
+  const env = { ...getPythonEnv(), SUMMODEL_PATH: modelPath }
+  summarizerProcess = spawn(getPythonCommand(), [script], { stdio: ['pipe', 'pipe', 'pipe'], env })
   currentSummaryModelPath = modelPath
 
   if (summarizerProcess.stdout) summarizerProcess.stdout.on('data', (d) => {
@@ -1048,14 +1050,13 @@ async function startBackend() {
   }
 
   const scriptPath = path.join(getBackendRoot(), 'record_and_transcribe.py')
-
-  const args: string[] = [scriptPath, '--model', currentModelName]
+  const env = { ...getPythonEnv(), WHISPER_MODEL: currentModelName }
 
   startSummarizerIfNeeded(resolveSummaryModelPath())
 
-  backendProcess = spawn(getPythonCommand(), args, {
+  backendProcess = spawn(getPythonCommand(), [scriptPath], {
     stdio: ['pipe', 'pipe', 'pipe'],
-    env: getPythonEnv(),
+    env,
   })
 
   if (backendProcess.stdout) backendProcess.stdout.on('data', (data) => {
@@ -1137,11 +1138,16 @@ async function processUploadedRecording(): Promise<{ ok: boolean; error?: string
   }
   startSummarizerIfNeeded(summaryModelPath)
   const script = path.join(getBackendRoot(), 'transcribe_file.py')
-  const args = [script, '--model', currentModelName, '--audio', destAudio, '--transcript-out', transcriptPath]
+  const env = {
+    ...getPythonEnv(),
+    TRANSCRIBE_MODEL: currentModelName,
+    TRANSCRIBE_AUDIO: destAudio,
+    TRANSCRIPT_OUT: transcriptPath,
+  }
   fileTranscribeStdoutBuf = ''
-  fileTranscribeProcess = spawn(getPythonCommand(), args, {
+  fileTranscribeProcess = spawn(getPythonCommand(), [script], {
     stdio: ['ignore', 'pipe', 'pipe'],
-    env: getPythonEnv(),
+    env,
   })
   if (fileTranscribeProcess.stdout) {
     fileTranscribeProcess.stdout.on('data', (data) => {

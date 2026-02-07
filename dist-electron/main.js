@@ -499,9 +499,10 @@ async function runSetupScript(whisperModel, whisperDir) {
   const script = path.join(getBackendRoot(), "setup.py");
   return new Promise((resolve, reject) => {
     var _a, _b;
-    const proc = spawn(getPythonCommand(), [script, "--whisper-model", whisperModel, "--whisper-dir", whisperDir], {
+    const env = { ...getPythonEnv(), WHISPER_MODEL: whisperModel, WHISPER_DIR: whisperDir };
+    const proc = spawn(getPythonCommand(), [script], {
       stdio: ["ignore", "pipe", "pipe"],
-      env: getPythonEnv()
+      env
     });
     let buf = "";
     (_a = proc.stdout) == null ? void 0 : _a.on("data", (data) => {
@@ -662,7 +663,8 @@ function startSummarizerIfNeeded(modelPath) {
     return;
   }
   const script = path.join(getBackendRoot(), "summarizer_daemon.py");
-  summarizerProcess = spawn(getPythonCommand(), [script, "--model-path", modelPath], { stdio: ["pipe", "pipe", "pipe"], env: getPythonEnv() });
+  const env = { ...getPythonEnv(), SUMMODEL_PATH: modelPath };
+  summarizerProcess = spawn(getPythonCommand(), [script], { stdio: ["pipe", "pipe", "pipe"], env });
   currentSummaryModelPath = modelPath;
   if (summarizerProcess.stdout) summarizerProcess.stdout.on("data", (d) => {
     const s = d.toString();
@@ -919,11 +921,11 @@ async function startBackend() {
     console.error("failed to send recording-ready false", e);
   }
   const scriptPath = path.join(getBackendRoot(), "record_and_transcribe.py");
-  const args = [scriptPath, "--model", currentModelName];
+  const env = { ...getPythonEnv(), WHISPER_MODEL: currentModelName };
   startSummarizerIfNeeded(resolveSummaryModelPath());
-  backendProcess = spawn(getPythonCommand(), args, {
+  backendProcess = spawn(getPythonCommand(), [scriptPath], {
     stdio: ["pipe", "pipe", "pipe"],
-    env: getPythonEnv()
+    env
   });
   if (backendProcess.stdout) backendProcess.stdout.on("data", (data) => {
     handleRecordOutput(data);
@@ -1001,11 +1003,16 @@ async function processUploadedRecording() {
   }
   startSummarizerIfNeeded(summaryModelPath);
   const script = path.join(getBackendRoot(), "transcribe_file.py");
-  const args = [script, "--model", currentModelName, "--audio", destAudio, "--transcript-out", transcriptPath];
+  const env = {
+    ...getPythonEnv(),
+    TRANSCRIBE_MODEL: currentModelName,
+    TRANSCRIBE_AUDIO: destAudio,
+    TRANSCRIPT_OUT: transcriptPath
+  };
   fileTranscribeStdoutBuf = "";
-  fileTranscribeProcess = spawn(getPythonCommand(), args, {
+  fileTranscribeProcess = spawn(getPythonCommand(), [script], {
     stdio: ["ignore", "pipe", "pipe"],
-    env: getPythonEnv()
+    env
   });
   if (fileTranscribeProcess.stdout) {
     fileTranscribeProcess.stdout.on("data", (data) => {

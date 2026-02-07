@@ -2,14 +2,12 @@
 """
 Local LLM summarizer using llama-cpp-python (ggml models).
 
-Usage examples:
-  # Summarize a transcript file and write summary.txt
-  python3 backend/summarize_llm.py --model-path models/ggml-model.bin --file sessions/2026-01-01T11-33-17/transcript.txt --out sessions/2026-01-01T11-33-17/summary.txt
+Usage:
+  SUMMODEL_PATH=models/ggml-model.bin SUM_TRANSCRIPT_FILE=sessions/2026-01-01T11-33-17/transcript.txt SUM_SUMMARY_OUT=sessions/2026-01-01T11-33-17/summary.txt python3 backend/summarize_llm.py
+  # or set SUM_TEXT instead of SUM_TRANSCRIPT_FILE when the transcript is already in memory
 
 This script summarizes the transcript in a single pass.
 """
-
-import argparse
 import os
 import re
 import sys
@@ -101,65 +99,59 @@ def summarize_direct(model_path: str, text: str, n_ctx: int = 2048):
 
 
 def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--model-path", required=True)
-    parser.add_argument("--file", help="Transcript file to summarize")
-    parser.add_argument("--text", help="Raw text to summarize (alternative to --file)")
-    parser.add_argument("--out", help="Output summary path (defaults to stdout)")
-    parser.add_argument("--n-ctx", type=int, default=0)
-    parser.add_argument("--min-words", type=int, default=0)
-    args = parser.parse_args()
-
-    if not os.path.exists(args.model_path):
-        print(f"Model not found: {args.model_path}", file=sys.stderr)
+    model_path = (os.getenv("SUMMODEL_PATH") or os.getenv("SUMMODEL") or "").strip()
+    if not model_path:
+        print("Model path not configured; set SUMMODEL_PATH or SUMMODEL", file=sys.stderr)
         sys.exit(2)
 
-    if args.file:
-        if not os.path.exists(args.file):
-            print(f"Transcript file not found: {args.file}", file=sys.stderr)
+    if not os.path.exists(model_path):
+        print(f"Model not found: {model_path}", file=sys.stderr)
+        sys.exit(2)
+
+    transcript_file = os.getenv("SUM_TRANSCRIPT_FILE")
+    text_env = os.getenv("SUM_TEXT")
+    if transcript_file:
+        if not os.path.exists(transcript_file):
+            print(f"Transcript file not found: {transcript_file}", file=sys.stderr)
             sys.exit(3)
-        with open(args.file, "r", encoding="utf-8") as f:
+        with open(transcript_file, "r", encoding="utf-8") as f:
             text = f.read()
-    elif args.text:
-        text = args.text
+    elif text_env is not None:
+        text = text_env
     else:
-        print("Either --file or --text must be provided", file=sys.stderr)
+        print("SUM_TRANSCRIPT_FILE or SUM_TEXT must be provided", file=sys.stderr)
         sys.exit(4)
 
     default_min_words = 20
-    if args.min_words and args.min_words > 0:
-        min_words = args.min_words
-    else:
-        min_words = min_words_from_env(default_min_words)
+    min_words = min_words_from_env(default_min_words)
     if count_words(text) < min_words:
         summary = "Not enough content to summarize.\nAction Items: none."
-        if args.out:
-            os.makedirs(os.path.dirname(args.out) or ".", exist_ok=True)
-            with open(args.out, "w", encoding="utf-8") as f:
+        output_path = os.getenv("SUM_SUMMARY_OUT")
+        if output_path:
+            os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
+            with open(output_path, "w", encoding="utf-8") as f:
                 f.write(summary)
-            print(f"Wrote summary to {args.out}")
+            print(f"Wrote summary to {output_path}")
         else:
             print(summary)
         return
 
-    # Run hierarchical summarization
     env_n_ctx = os.getenv("SUM_N_CTX", "").strip()
     default_n_ctx = 2048
-    if args.n_ctx and args.n_ctx > 0:
-        n_ctx = args.n_ctx
-    elif env_n_ctx.isdigit():
+    if env_n_ctx.isdigit():
         n_ctx = int(env_n_ctx)
     else:
         n_ctx = default_n_ctx
 
-    client, summary = summarize_direct(args.model_path, text, n_ctx=n_ctx)
+    client, summary = summarize_direct(model_path, text, n_ctx=n_ctx)
     summary = ensure_min_sentences(summary, text, client)
 
-    if args.out:
-        os.makedirs(os.path.dirname(args.out) or ".", exist_ok=True)
-        with open(args.out, "w", encoding="utf-8") as f:
+    output_path = os.getenv("SUM_SUMMARY_OUT")
+    if output_path:
+        os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
+        with open(output_path, "w", encoding="utf-8") as f:
             f.write(summary)
-        print(f"Wrote summary to {args.out}")
+        print(f"Wrote summary to {output_path}")
     else:
         print(summary)
 

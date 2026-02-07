@@ -5,7 +5,6 @@ Bootstrap dependencies and download required models before recording.
 Emits JSON lines to stdout for UI progress.
 """
 
-import argparse
 import json
 import os
 import sys
@@ -77,17 +76,13 @@ def ensure_vad_model():
 
 
 def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--whisper-model", default="small.en", help="Whisper model name")
-    parser.add_argument("--whisper-dir", default="", help="Whisper download directory")
-    args = parser.parse_args()
-
-    whisper_dir = args.whisper_dir.strip() or None
+    whisper_model = os.getenv("WHISPER_MODEL", "small.en")
+    whisper_dir = os.getenv("WHISPER_DIR", "").strip() or None
     if whisper_dir:
         os.makedirs(whisper_dir, exist_ok=True)
 
     check_imports()
-    ensure_whisper_model(args.whisper_model, whisper_dir)
+    ensure_whisper_model(whisper_model, whisper_dir)
     ensure_vad_model()
     emit("done", "setup complete")
 

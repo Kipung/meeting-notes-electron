@@ -19,7 +19,6 @@ Events (stdout JSON lines):
   {"event":"error","msg":"...","out":"..."}
 """
 
-import argparse
 import json
 import os
 import re
@@ -383,32 +382,30 @@ def repl_loop(daemon: SummarizerDaemon):
 
 
 def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--model-path", required=True)
-    parser.add_argument("--n-ctx", type=int, default=0)
-    parser.add_argument("--min-words", type=int, default=0)
-    args = parser.parse_args()
+    model_path = (os.getenv("SUMMODEL_PATH") or os.getenv("SUMMODEL") or "").strip()
+    if not model_path:
+        print(
+            json.dumps(
+                {"event": "error", "msg": "model path not configured; set SUMMODEL_PATH or SUMMODEL"}
+            )
+        )
+        return 2
 
-    if not os.path.exists(args.model_path):
-        print(json.dumps({"event": "error", "msg": f"model not found: {args.model_path}"}))
+    if not os.path.exists(model_path):
+        print(json.dumps({"event": "error", "msg": f"model not found: {model_path}"}))
         return 2
 
     env_n_ctx = os.getenv("SUM_N_CTX", "").strip()
     default_n_ctx = 2048
-    if args.n_ctx and args.n_ctx > 0:
-        n_ctx = args.n_ctx
-    elif env_n_ctx.isdigit():
+    if env_n_ctx.isdigit():
         n_ctx = int(env_n_ctx)
     else:
         n_ctx = default_n_ctx
 
     default_min_words = 20
-    if args.min_words and args.min_words > 0:
-        min_words = args.min_words
-    else:
-        min_words = min_words_from_env(default_min_words)
+    min_words = min_words_from_env(default_min_words)
 
-    daemon = SummarizerDaemon(args.model_path, n_ctx, min_words)
+    daemon = SummarizerDaemon(model_path, n_ctx, min_words)
     repl_loop(daemon)
     return 0
 

@@ -3,7 +3,10 @@
 Transcribe an existing audio recording and output JSON events so the Electron UI can reuse the existing pipeline.
 
 Usage:
-  python3 backend/transcribe_file.py --audio /path/to/audio.wav --transcript-out /path/to/transcript.txt --model small.en
+  Set the environment variables below instead of passing CLI flags:
+    TRANSCRIBE_AUDIO=/path/to/audio.wav
+    TRANSCRIPT_OUT=/path/to/transcript.txt   # optional (defaults next to the audio)
+    TRANSCRIBE_MODEL=small.en                 # optional (defaults to small.en)
 
 Emits:
   {"event":"ready"}
@@ -12,7 +15,6 @@ Emits:
   {"event":"error","msg":"..."}
 """
 
-import argparse
 import json
 import os
 import sys
@@ -40,29 +42,29 @@ def load_model(model_name: str):
 
 
 def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--model", default="small.en")
-    parser.add_argument("--audio", required=True)
-    parser.add_argument("--transcript-out", dest="transcript_out")
-    args = parser.parse_args()
-
-    audio_path = args.audio
+    model_name = os.getenv("TRANSCRIBE_MODEL", "small.en")
+    audio_path = os.getenv("TRANSCRIBE_AUDIO")
+    if not audio_path:
+        send({"event": "error", "msg": "TRANSCRIBE_AUDIO not configured"})
+        sys.exit(2)
     if not os.path.exists(audio_path):
         send({"event": "error", "msg": f"audio file not found: {audio_path}"})
         sys.exit(2)
-    transcript_out = args.transcript_out or os.path.join(os.path.dirname(audio_path), "transcript.txt")
+    transcript_out = os.getenv("TRANSCRIPT_OUT")
+    if not transcript_out:
+        transcript_out = os.path.join(os.path.dirname(audio_path), "transcript.txt")
     os.makedirs(os.path.dirname(transcript_out) or ".", exist_ok=True)
 
     send({"event": "ready"})
     try:
-        model = load_model(args.model)
+        whisper_model = load_model(model_name)
     except Exception as e:
-        send({"event": "error", "msg": f"failed to load model {args.model}: {e}"})
+        send({"event": "error", "msg": f"failed to load model {model_name}: {e}"})
         sys.exit(3)
 
     send({"event": "started", "out": audio_path, "transcript_out": transcript_out})
     try:
-        result = model.transcribe(audio_path, language="en", task="transcribe", fp16=False)
+        result = whisper_model.transcribe(audio_path, language="en", task="transcribe", fp16=False)
         text = result.get("text", "").strip()
         with open(transcript_out, "w", encoding="utf-8") as f:
             f.write(text)

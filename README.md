@@ -268,6 +268,8 @@ pnpm build
 pnpm dev
 ```
 
+The bundled `setup.py` helper now reads its configuration from environment variables (`WHISPER_MODEL` and `WHISPER_DIR`) instead of command-line flags, so set those before running it manually (the app already does this automatically).
+
 ## Summarization model
 
 The app preloads a llama-cpp model via `backend/summarizer_daemon.py`.
@@ -277,6 +279,8 @@ Override with an env var:
 ```bash
 SUMMODEL=/path/to/your/model.gguf pnpm dev
 ```
+
+If you ever run `python3 backend/summarizer_daemon.py` directly (for debugging or remote use), set `SUMMODEL_PATH` (or `SUMMODEL`) beforehand; the daemon no longer accepts command-line flags such as `--model-path`.
 
 The model path should be a GGUF or GGML file. A smaller Llama model (3B-8B) is a good starting point.
 
@@ -300,6 +304,18 @@ To avoid hallucinated summaries on extremely short or empty recordings, the summ
 ```bash
 SUM_MIN_WORDS=10 pnpm dev
 ```
+
+### Manual backend scripts
+All of the bundled python helpers now read configuration from environment variables instead of CLI flags. If you ever need to debug them manually, set the vars before running each script:
+
+```bash
+WHISPER_MODEL=small.en python3 backend/record_and_transcribe.py
+WHISPER_MODEL=small.en WHISPER_DIR=/path/to/whisper/python3 backend/setup.py
+TRANSCRIBE_AUDIO=/path/to/audio.wav TRANSCRIPT_OUT=/path/to/transcript.txt TRANSCRIBE_MODEL=small.en python3 backend/transcribe_file.py
+SUMMODEL_PATH=models/<your-model>.gguf SUM_TRANSCRIPT_FILE=app.getPath('userData')/sessions/<timestamp>/transcript.txt SUM_SUMMARY_OUT=app.getPath('userData')/sessions/<timestamp>/summary.txt python3 backend/summarize_llm.py
+```
+
+`SUM_TEXT` can be provided in lieu of `SUM_TRANSCRIPT_FILE`, and `SUM_N_CTX` or `SUM_MIN_WORDS` are honored the same way as the daemon.
 
 ## Faster end-of-session processing
 
@@ -366,9 +382,3 @@ Options:
 - `--ffmpeg /path/to/ffmpeg`
 - `--ffmpeg-lib /path/to/lib`
 - `--force` (overwrite existing `python/`)
-
-## Manual summarization (LLM)
-
-```bash
-python3 backend/summarize_llm.py --model-path models/<your-model>.gguf --file app.getPath('userData')/sessions/<timestamp>/transcript.txt --out app.getPath('userData')/sessions/<timestamp>/summary.txt
-```

@@ -164,11 +164,7 @@ def _mix_audio(mic_i16: np.ndarray, loop_i16: np.ndarray) -> np.ndarray:
 
 
 def main():
-    model_name = "small.en"
-    if "--model" in sys.argv:
-        idx = sys.argv.index("--model")
-        if idx + 1 < len(sys.argv):
-            model_name = sys.argv[idx + 1]
+    model_name = os.getenv("WHISPER_MODEL", "small.en")
     pa = pyaudio.PyAudio()
     capture_channels = TARGET_CHANNELS
     capture_rate = TARGET_RATE
