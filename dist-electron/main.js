@@ -287,7 +287,7 @@ ${leftover}`);
   }
 }
 function handleChunkSummarizerEvent(obj, context) {
-  if (context.type !== "chunk") return;
+  if (!context || context.type !== "chunk") return;
   if (!context.sessionDir || context.sessionDir !== chunkSummariesSession) return;
   const chunkId = typeof context.id === "number" ? context.id : null;
   if (obj.event === "progress") {
@@ -597,7 +597,7 @@ async function ensureSummaryModel() {
   if (app.isPackaged) {
     throw new Error("summary model missing in installer");
   }
-  const url = process.env["SUMMODEL_URL"] || DEFAULT_SUMMARY_MODEL_URL;
+  const url = process.env["SUMMODEL_URL"];
   if (!url) {
     throw new Error(
       `summary model missing; place ${DEFAULT_SUMMARY_MODEL_NAME} under ${path.join(process.env.APP_ROOT, "models")} or set SUMMODEL_URL to download it`

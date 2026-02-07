@@ -1,13 +1,3 @@
-#!/usr/bin/env python3
-"""
-Local LLM summarizer using llama-cpp-python (ggml models).
-
-Usage:
-  SUMMODEL_PATH=models/ggml-model.bin SUM_TRANSCRIPT_FILE=sessions/2026-01-01T11-33-17/transcript.txt SUM_SUMMARY_OUT=sessions/2026-01-01T11-33-17/summary.txt python3 backend/summarize_llm.py
-  # or set SUM_TEXT instead of SUM_TRANSCRIPT_FILE when the transcript is already in memory
-
-This script summarizes the transcript in a single pass.
-"""
 import os
 import re
 import sys

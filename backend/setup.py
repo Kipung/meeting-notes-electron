@@ -1,10 +1,3 @@
-#!/usr/bin/env python3
-"""
-Bootstrap dependencies and download required models before recording.
-
-Emits JSON lines to stdout for UI progress.
-"""
-
 import json
 import os
 import sys
@@ -19,11 +12,11 @@ def emit(event: str, message: str, **fields):
 def check_imports():
     emit("status", "checking python dependencies")
     try:
-        import torch  # noqa: F401
-        import torchaudio  # noqa: F401
-        import whisper  # noqa: F401
-        import pyaudio  # noqa: F401
-        import llama_cpp  # noqa: F401
+        import torch 
+        import torchaudio  
+        import whisper  
+        import pyaudio 
+        import llama_cpp 
     except Exception as exc:
         emit("error", f"dependency import failed: {exc}")
         sys.exit(2)

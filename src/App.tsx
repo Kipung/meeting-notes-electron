@@ -691,7 +691,12 @@ function App() {
               {processingRecordingFile ? 'Processing...' : 'Process recording file'}
             </button>
           </div>
-          <div className="output-panel__body output-panel__body--scrollable">{transcript || '(empty)'}</div>
+          <textarea
+            className="output-panel__textarea output-panel__textarea--scrollable"
+            value={transcript}
+            onChange={(e) => setTranscript(e.target.value)}
+            placeholder="Transcript will appear here..."
+          />
         </div>
 
         <div className="output-panel">
@@ -699,7 +704,12 @@ function App() {
           <button onClick={() => copyToClipboard(summaryWithMeta)} disabled={!summary} style={{ marginBottom: 8 }}>
             Copy summary
           </button>
-          <div className="output-panel__body">{summaryWithMeta || '(empty)'}</div>
+          <textarea
+            className="output-panel__textarea"
+            value={summary}
+            onChange={(e) => setSummary(e.target.value)}
+            placeholder="Summary will appear here..."
+          />
         </div>
 
         <div className="output-panel">

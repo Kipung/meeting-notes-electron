@@ -1,24 +1,3 @@
-#!/usr/bin/env python3
-"""
-Persistent summarizer daemon using llama-cpp-python to avoid reloads.
-
-Protocol (stdin JSON lines):
-  {"cmd":"summarize", "file":"/path/to/transcript.txt", "out":"/path/to/summary.txt"}
-  {"cmd":"summarize", "text":"...", "out":"/path/to/summary.txt"}
-  {"cmd":"followup_email", "summary":"...", "student_name":"...", "instructions":"...", "id":"..."}
-  {"cmd":"load_model", "model_path":"/path/to/model.gguf"}
-
-Events (stdout JSON lines):
-  {"event":"loaded","model":"..."}
-  {"event":"progress","msg":"..."}
-  {"event":"summary_start","out":"..."}
-  {"event":"summary_delta","text":"...","out":"..."}
-  {"event":"done","out":"...","text":"...","secs":1.23}
-  {"event":"followup_done","text":"...","secs":1.23,"id":"..."}
-  {"event":"followup_error","msg":"...","id":"..."}
-  {"event":"error","msg":"...","out":"..."}
-"""
-
 import json
 import os
 import re

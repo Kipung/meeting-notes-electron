@@ -1,20 +1,3 @@
-#!/usr/bin/env python3
-"""
-Transcribe an existing audio recording and output JSON events so the Electron UI can reuse the existing pipeline.
-
-Usage:
-  Set the environment variables below instead of passing CLI flags:
-    TRANSCRIBE_AUDIO=/path/to/audio.wav
-    TRANSCRIPT_OUT=/path/to/transcript.txt   # optional (defaults next to the audio)
-    TRANSCRIBE_MODEL=small.en                 # optional (defaults to small.en)
-
-Emits:
-  {"event":"ready"}
-  {"event":"started","out":"...","transcript_out":"..."}
-  {"event":"done","out":"...","text":"..."}
-  {"event":"error","msg":"..."}
-"""
-
 import json
 import os
 import sys

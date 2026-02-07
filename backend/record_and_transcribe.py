@@ -1,19 +1,3 @@
-#!/usr/bin/env python3
-"""
-Persistent recorder with Silero VAD + Whisper transcription.
-
-Protocol (stdin JSON lines or plain commands):
-  {"cmd":"start","out":"/path/audio.wav","transcript_out":"/path/transcript.txt","device_index":1,"loopback_device_index":2}
-  {"cmd":"stop"}
-  {"cmd":"pause"}
-  {"cmd":"resume"}
-  {"cmd":"shutdown"}
-
-Emits JSON on stdout:
-  {"event":"started","out":"...","transcript_out":"..."}
-  {"event":"done","out":"...","text":"..."}
-  {"event":"error","msg":"..."}
-"""
 
 import collections
 import json
@@ -81,7 +65,7 @@ def _write_transcript(path: str, text: str):
 
 def _vad_load():
     try:
-        import torchaudio  # noqa: F401
+        import torchaudio 
     except Exception as e:
         print(f"[vad] missing torchaudio: {e}", file=sys.stderr, flush=True)
         return None
@@ -164,7 +148,11 @@ def _mix_audio(mic_i16: np.ndarray, loop_i16: np.ndarray) -> np.ndarray:
 
 
 def main():
-    model_name = os.getenv("WHISPER_MODEL", "small.en")
+    model_name = "small.en"
+    if "--model" in sys.argv:
+        idx = sys.argv.index("--model")
+        if idx + 1 < len(sys.argv):
+            model_name = sys.argv[idx + 1]
     pa = pyaudio.PyAudio()
     capture_channels = TARGET_CHANNELS
     capture_rate = TARGET_RATE
