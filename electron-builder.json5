@@ -4,7 +4,13 @@
   "appId": "YourAppID",
   "asar": true,
   "productName": "YourAppName",
-  "publish": null,
+  "publish": [
+    {
+      "provider": "github",
+      "owner": "Kipung",
+      "repo": "meeting-notes-electron"
+    }
+  ],
   "directories": {
     "output": "release/${version}"
   },
