@@ -352,9 +352,12 @@ function App() {
     : summary
   const sessionDirLabel = sessionDir ? compactPath(sessionDir, sessionsRoot) : null
   const sessionsRootLabel = sessionsRoot ? compactPath(sessionsRoot) : '(loading...)'
+  const recorderLoading = !running && (setupState !== 'done' || !recorderReady)
   const primaryActionLabel = !running ? 'Start' : recordingState === 'paused' ? 'Resume' : 'Pause'
   const primaryActionColor = !running ? '#ff3b30' : '#f1f1f1'
-  const primaryActionIcon = !running ? (
+  const primaryActionIcon = recorderLoading ? (
+    <span className="primary-action-spinner" aria-hidden="true" />
+  ) : !running ? (
     <svg width="14" height="14" viewBox="0 0 14 14" aria-hidden="true">
       <circle cx="7" cy="7" r="5" fill="currentColor" />
     </svg>

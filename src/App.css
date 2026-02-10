@@ -86,6 +86,24 @@
   flex-wrap: wrap;
 }
 
+.primary-action-spinner {
+  width: 18px;
+  height: 18px;
+  border: 2px solid rgba(255, 255, 255, 0.2);
+  border-top-color: #ff3b30;
+  border-radius: 999px;
+  animation: primarySpin 0.8s linear infinite;
+}
+
+@keyframes primarySpin {
+  0% {
+    transform: rotate(0deg);
+  }
+  100% {
+    transform: rotate(360deg);
+  }
+}
+
 .output-columns {
   display: flex;
   gap: 16px;
