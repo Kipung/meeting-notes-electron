@@ -3,14 +3,9 @@ import os
 import sys
 
 try:
-    import torch
-except ImportError:
-    torch = None  # whisper will raise if torch is missing
-
-try:
-    import whisper
+    from faster_whisper import WhisperModel
 except Exception as e:
-    print(json.dumps({"event": "error", "msg": f"failed to import whisper: {e}"}))
+    print(json.dumps({"event": "error", "msg": f"failed to import faster-whisper: {e}"}))
     sys.exit(1)
 
 
@@ -19,9 +14,21 @@ def send(obj: dict):
 
 
 def load_model(model_name: str):
-    device = "cuda" if torch and torch.cuda.is_available() else "cpu"
     download_root = os.environ.get("WHISPER_ROOT")
-    return whisper.load_model(model_name, device=device, download_root=download_root)
+    try:
+        return WhisperModel(
+            model_name,
+            device="cuda",
+            compute_type="float16",
+            download_root=download_root,
+        )
+    except Exception:
+        return WhisperModel(
+            model_name,
+            device="cpu",
+            compute_type="int8",
+            download_root=download_root,
+        )
 
 
 def main():
@@ -47,8 +54,8 @@ def main():
 
     send({"event": "started", "out": audio_path, "transcript_out": transcript_out})
     try:
-        result = whisper_model.transcribe(audio_path, language="en", task="transcribe", fp16=False)
-        text = result.get("text", "").strip()
+        segments, _info = whisper_model.transcribe(audio_path, language="en", task="transcribe")
+        text = " ".join(segment.text.strip() for segment in segments if segment.text).strip()
         with open(transcript_out, "w", encoding="utf-8") as f:
             f.write(text)
         send({"event": "done", "out": transcript_out, "text": text})

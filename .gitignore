@@ -38,3 +38,6 @@ dist-electron/
 *.njsproj
 *.sln
 *.sw?
+
+# Pycache
+__pycache__/

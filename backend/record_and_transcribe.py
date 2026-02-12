@@ -14,8 +14,7 @@ if sys.platform == "win32":
     import pyaudiowpatch as pyaudio
 else:
     import pyaudio
-import torch
-import whisper
+from faster_whisper import WhisperModel
 
 
 TARGET_RATE = 16000
@@ -65,32 +64,22 @@ def _write_transcript(path: str, text: str):
 
 def _vad_load():
     try:
-        import torchaudio 
+        from silero_vad import load_silero_vad
     except Exception as e:
-        print(f"[vad] missing torchaudio: {e}", file=sys.stderr, flush=True)
+        print(f"[vad] missing silero-vad dependency: {e}", file=sys.stderr, flush=True)
         return None
     try:
-        model, _utils = torch.hub.load(
-            repo_or_dir="snakers4/silero-vad",
-            model="silero_vad",
-            trust_repo=True,
-            force_reload=False,
-        )
-        return model
+        return load_silero_vad(onnx=True, opset_version=16)
     except Exception as e:
-        print(f"[vad] failed to load silero-vad: {e}", file=sys.stderr, flush=True)
+        print(f"[vad] failed to load silero-vad (onnx): {e}", file=sys.stderr, flush=True)
         return None
 
 
 def _vad_prob(vad_model, audio_float: np.ndarray, sample_rate: int) -> float:
     if vad_model is None:
         return 0.0
-    with torch.no_grad():
-        tensor = torch.from_numpy(audio_float)
-        prob = vad_model(tensor, sample_rate)
-        if isinstance(prob, torch.Tensor):
-            return float(prob.item())
-        return float(prob)
+    prob = vad_model(audio_float, sample_rate)
+    return float(prob.item() if hasattr(prob, "item") else prob)
 
 
 def _downmix_to_mono(audio_i16: np.ndarray, channels: int) -> np.ndarray:
@@ -165,11 +154,24 @@ def main():
     if hasattr(vad_model, "reset_states"):
         vad_model.reset_states()
 
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    print(f"[transcribe] loading model {model_name} on {device}", flush=True)
     try:
         download_root = os.environ.get("WHISPER_ROOT")
-        whisper_model = whisper.load_model(model_name, device=device, download_root=download_root)
+        try:
+            whisper_model = WhisperModel(
+                model_name,
+                device="cuda",
+                compute_type="float16",
+                download_root=download_root,
+            )
+            print(f"[transcribe] loading model {model_name} on cuda (float16)", flush=True)
+        except Exception:
+            whisper_model = WhisperModel(
+                model_name,
+                device="cpu",
+                compute_type="int8",
+                download_root=download_root,
+            )
+            print(f"[transcribe] loading model {model_name} on cpu (int8)", flush=True)
     except Exception as e:
         print(f"[transcribe] failed to load model: {e}", file=sys.stderr, flush=True)
         sys.exit(3)
@@ -304,8 +306,12 @@ def main():
                             return
                         audio_i16 = item
                         audio_f32 = audio_i16.astype(np.float32) / 32768.0
-                        result = whisper_model.transcribe(audio_f32, language="en", task="transcribe", fp16=False)
-                        text = result.get("text", "").strip()
+                        segments, _info = whisper_model.transcribe(
+                            audio_f32,
+                            language="en",
+                            task="transcribe",
+                        )
+                        text = " ".join(segment.text.strip() for segment in segments if segment.text).strip()
                         if text:
                             with state.transcript_lock:
                                 state.transcript_parts.append(text)

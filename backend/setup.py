@@ -12,9 +12,9 @@ def emit(event: str, message: str, **fields):
 def check_imports():
     emit("status", "checking python dependencies")
     try:
-        import torch 
-        import torchaudio  
-        import whisper  
+        import faster_whisper  
+        import silero_vad  
+        import onnxruntime  
         import pyaudio 
         import llama_cpp 
     except Exception as exc:
@@ -23,46 +23,38 @@ def check_imports():
 
 
 def ensure_whisper_model(model_name: str, download_root: str = None):
-    emit("status", f"downloading whisper model {model_name}")
+    emit("status", f"downloading faster-whisper model {model_name}")
     try:
-        import whisper
+        from faster_whisper import WhisperModel
     except Exception as exc:
-        emit("error", f"failed to import whisper: {exc}")
+        emit("error", f"failed to import faster-whisper: {exc}")
         sys.exit(3)
 
-    model_file = None
-    if download_root:
-        model_file = os.path.join(download_root, f"{model_name}.pt")
-        if os.path.exists(model_file):
-            emit("status", f"whisper model already present: {model_name}")
-            return
-
     try:
-        whisper.load_model(model_name, download_root=download_root)
+        try:
+            WhisperModel(
+                model_name,
+                device="cuda",
+                compute_type="float16",
+                download_root=download_root,
+            )
+        except Exception:
+            WhisperModel(
+                model_name,
+                device="cpu",
+                compute_type="int8",
+                download_root=download_root,
+            )
     except Exception as exc:
-        emit("error", f"whisper download failed: {exc}")
+        emit("error", f"faster-whisper download failed: {exc}")
         sys.exit(4)
-
-    if model_file and not os.path.exists(model_file):
-        emit("error", f"whisper model not found after download: {model_file}")
-        sys.exit(5)
 
 
 def ensure_vad_model():
-    emit("status", "loading silero VAD model")
+    emit("status", "loading silero VAD model (onnxruntime)")
     try:
-        import torch
-    except Exception as exc:
-        emit("error", f"failed to import torch: {exc}")
-        sys.exit(6)
-
-    try:
-        torch.hub.load(
-            repo_or_dir="snakers4/silero-vad",
-            model="silero_vad",
-            trust_repo=True,
-            force_reload=False,
-        )
+        from silero_vad import load_silero_vad
+        load_silero_vad(onnx=True, opset_version=16)
     except Exception as exc:
         emit("error", f"vad model load failed: {exc}")
         sys.exit(7)
