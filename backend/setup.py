@@ -14,8 +14,11 @@ def check_imports():
     try:
         import faster_whisper  
         import silero_vad  
-        import onnxruntime  
-        import pyaudio 
+        import onnxruntime
+        if sys.platform == "win32":
+            import pyaudiowpatch as pyaudio
+        else:
+            import pyaudio 
         import llama_cpp 
     except Exception as exc:
         emit("error", f"dependency import failed: {exc}")
@@ -26,35 +29,38 @@ def ensure_whisper_model(model_name: str, download_root: str = None):
     emit("status", f"downloading faster-whisper model {model_name}")
     try:
         from faster_whisper import WhisperModel
+        import numpy as np
     except Exception as exc:
         emit("error", f"failed to import faster-whisper: {exc}")
         sys.exit(3)
+    emit("status", f"faster-whisper download root: {download_root or 'default cache directory'}")
 
-    try:
+    last_error = None
+    for device, compute_type in (("cuda", "float16"), ("cpu", "int8")):
         try:
-            WhisperModel(
+            model = WhisperModel(
                 model_name,
-                device="cuda",
-                compute_type="float16",
+                device=device,
+                compute_type=compute_type,
                 download_root=download_root,
             )
+            warmup_segments, _ = model.transcribe(np.zeros(16000, dtype=np.float32), language="en", task="transcribe")
+            for _ in warmup_segments:
+                pass
+            return
         except Exception:
-            WhisperModel(
-                model_name,
-                device="cpu",
-                compute_type="int8",
-                download_root=download_root,
-            )
-    except Exception as exc:
-        emit("error", f"faster-whisper download failed: {exc}")
-        sys.exit(4)
+            last_error = sys.exc_info()[1]
+            continue
+
+    emit("error", f"faster-whisper download/init failed: {last_error}")
+    sys.exit(4)
 
 
 def ensure_vad_model():
     emit("status", "loading silero VAD model (onnxruntime)")
     try:
         from silero_vad import load_silero_vad
-        load_silero_vad(onnx=True, opset_version=16)
+        load_silero_vad(onnx=True)
     except Exception as exc:
         emit("error", f"vad model load failed: {exc}")
         sys.exit(7)

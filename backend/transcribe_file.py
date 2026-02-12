@@ -15,20 +15,23 @@ def send(obj: dict):
 
 def load_model(model_name: str):
     download_root = os.environ.get("WHISPER_ROOT")
-    try:
-        return WhisperModel(
-            model_name,
-            device="cuda",
-            compute_type="float16",
-            download_root=download_root,
-        )
-    except Exception:
-        return WhisperModel(
-            model_name,
-            device="cpu",
-            compute_type="int8",
-            download_root=download_root,
-        )
+    for device, compute_type in (("cuda", "float16"), ("cpu", "int8")):
+        try:
+            model = WhisperModel(
+                model_name,
+                device=device,
+                compute_type=compute_type,
+                download_root=download_root,
+            )
+            # Force backend runtime initialization early so missing CUDA DLLs
+            # are handled via fallback before real transcription starts.
+            warmup_segments, _ = model.transcribe([0.0] * 16000, language="en", task="transcribe")
+            for _ in warmup_segments:
+                pass
+            return model
+        except Exception:
+            continue
+    raise RuntimeError("unable to initialize faster-whisper on both cuda and cpu")
 
 
 def main():

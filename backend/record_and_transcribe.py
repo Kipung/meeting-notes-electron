@@ -15,6 +15,10 @@ if sys.platform == "win32":
 else:
     import pyaudio
 from faster_whisper import WhisperModel
+try:
+    import torch
+except Exception:
+    torch = None
 
 
 TARGET_RATE = 16000
@@ -69,7 +73,7 @@ def _vad_load():
         print(f"[vad] missing silero-vad dependency: {e}", file=sys.stderr, flush=True)
         return None
     try:
-        return load_silero_vad(onnx=True, opset_version=16)
+        return load_silero_vad(onnx=True)
     except Exception as e:
         print(f"[vad] failed to load silero-vad (onnx): {e}", file=sys.stderr, flush=True)
         return None
@@ -78,8 +82,15 @@ def _vad_load():
 def _vad_prob(vad_model, audio_float: np.ndarray, sample_rate: int) -> float:
     if vad_model is None:
         return 0.0
-    prob = vad_model(audio_float, sample_rate)
-    return float(prob.item() if hasattr(prob, "item") else prob)
+    try:
+        audio_input = audio_float
+        if torch is not None and isinstance(audio_float, np.ndarray):
+            audio_input = torch.from_numpy(audio_float)
+        prob = vad_model(audio_input, sample_rate)
+        return float(prob.item() if hasattr(prob, "item") else prob)
+    except Exception as e:
+        print(f"[vad] inference error: {e}", file=sys.stderr, flush=True)
+        return 0.0
 
 
 def _downmix_to_mono(audio_i16: np.ndarray, channels: int) -> np.ndarray:
@@ -136,6 +147,31 @@ def _mix_audio(mic_i16: np.ndarray, loop_i16: np.ndarray) -> np.ndarray:
     return np.rint(mixed).astype(np.int16)
 
 
+def _load_whisper_model(model_name: str, download_root: str | None):
+    for device, compute_type in (("cuda", "float16"), ("cpu", "int8")):
+        try:
+            model = WhisperModel(
+                model_name,
+                device=device,
+                compute_type=compute_type,
+                download_root=download_root,
+            )
+            # Force backend runtime initialization early so missing CUDA DLLs
+            # are detected here instead of in the transcription worker thread.
+            warmup_audio = np.zeros(TARGET_RATE, dtype=np.float32)
+            warmup_segments, _ = model.transcribe(warmup_audio, language="en", task="transcribe")
+            for _ in warmup_segments:
+                pass
+            return model, device, compute_type
+        except Exception as e:
+            print(
+                f"[transcribe] failed on {device} ({compute_type}), trying fallback: {e}",
+                file=sys.stderr,
+                flush=True,
+            )
+    raise RuntimeError("unable to initialize faster-whisper on both cuda and cpu")
+
+
 def main():
     model_name = "small.en"
     if "--model" in sys.argv:
@@ -156,22 +192,9 @@ def main():
 
     try:
         download_root = os.environ.get("WHISPER_ROOT")
-        try:
-            whisper_model = WhisperModel(
-                model_name,
-                device="cuda",
-                compute_type="float16",
-                download_root=download_root,
-            )
-            print(f"[transcribe] loading model {model_name} on cuda (float16)", flush=True)
-        except Exception:
-            whisper_model = WhisperModel(
-                model_name,
-                device="cpu",
-                compute_type="int8",
-                download_root=download_root,
-            )
-            print(f"[transcribe] loading model {model_name} on cpu (int8)", flush=True)
+        print(f"[transcribe] loading model {model_name} with download root {download_root}", flush=True)
+        whisper_model, model_device, model_compute = _load_whisper_model(model_name, download_root)
+        print(f"[transcribe] loading model {model_name} on {model_device} ({model_compute})", flush=True)
     except Exception as e:
         print(f"[transcribe] failed to load model: {e}", file=sys.stderr, flush=True)
         sys.exit(3)

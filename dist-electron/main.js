@@ -175,7 +175,6 @@ function getPythonEnv() {
   }
   env.GGML_LOG_LEVEL = env.GGML_LOG_LEVEL || "0";
   env.LLAMA_CPP_LOG_LEVEL = env.LLAMA_CPP_LOG_LEVEL || "0";
-  env.TORCH_CPP_LOG_LEVEL = env.TORCH_CPP_LOG_LEVEL || "0";
   return env;
 }
 function countWords(text) {
