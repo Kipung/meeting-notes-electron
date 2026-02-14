@@ -123,6 +123,7 @@
   min-height: 160px;
   border: 1px solid #2b2b2b;
   border-radius: 6px;
+  line-height: 1.5;
 }
 
 .output-panel__body--scrollable {
@@ -138,8 +139,9 @@
   border: 1px solid #2b2b2b;
   border-radius: 6px;
   padding: 10px;
-  font-family: 'Menlo', 'SFMono-Regular', 'Roboto Mono', monospace;
+  font-family: 'Inter', 'Segoe UI', 'system-ui', sans-serif;
   font-size: 0.95rem;
+  line-height: 1.5;
   resize: vertical;
   box-sizing: border-box;
   outline: none;

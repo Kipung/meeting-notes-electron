@@ -309,62 +309,6 @@ function handleChunkSummarizerEvent(obj, context) {
     maybeStartPendingFinalSummary();
   }
 }
-function formatActionItemsForDisplay(text) {
-  const marker = "Action Items:";
-  const idx = text.indexOf(marker);
-  if (idx === -1) return text;
-  const before = text.slice(0, idx);
-  const remainder = text.slice(idx + marker.length);
-  const trimmed = remainder.trim();
-  if (!trimmed) return `${before}${marker}`;
-  const normalizedNone = trimmed.replace(/\.*$/, "").trim().toLowerCase();
-  if (normalizedNone === "none") {
-    return `${before}${marker} ${trimmed}`;
-  }
-  const items = parseActionItems(trimmed);
-  if (items.length === 0) {
-    return `${before}${marker}
-${trimmed}`;
-  }
-  const limitedItems = items.slice(0, 5);
-  const bullets = limitedItems.map((item) => `- ${item}`);
-  return `${before}${marker}
-${bullets.join("\n")}`;
-}
-function splitActionSentences(text) {
-  const normalized = text.replace(/\s+/g, " ").trim();
-  if (!normalized) return [];
-  const matches = normalized.match(/[^.!?]+[.!?]*/g) || [];
-  return matches.map((segment) => segment.trim()).filter(Boolean);
-}
-function stripLeadingBullet(line) {
-  return line.replace(/^[•\-\*]\s*/, "").trim();
-}
-function parseActionItems(raw) {
-  const normalized = raw.replace(/\r/g, "").trim();
-  if (!normalized) return [];
-  const lines = normalized.split(/\n+/).map((line) => line.trim()).filter(Boolean);
-  if (lines.length > 1) {
-    return lines.map(stripLeadingBullet);
-  }
-  const singleLine = lines[0];
-  const singleBulletMatch = singleLine.match(/^[•\-\*]\s*(.+)$/);
-  if (singleBulletMatch) {
-    return [singleBulletMatch[1].trim()];
-  }
-  const numberedParts = singleLine.split(/(?=\d+\.)/g).map((part) => part.replace(/^\d+\.\s*/, "").trim()).filter(Boolean);
-  if (numberedParts.length > 1) {
-    return numberedParts;
-  }
-  const sentences = splitActionSentences(singleLine);
-  if (sentences.length > 1) {
-    return sentences;
-  }
-  if (sentences.length === 1) {
-    return sentences;
-  }
-  return [singleLine];
-}
 function sendBootstrapStatus(state, message, percent) {
   try {
     win == null ? void 0 : win.webContents.send("bootstrap-status", { state, message, percent });
@@ -706,7 +650,7 @@ function startSummarizerIfNeeded(modelPath) {
           }
         } else if (obj.event === "done") {
           const summaryOut = obj.out;
-          const summaryText = formatActionItemsForDisplay(obj.text || "");
+          const summaryText = obj.text || "";
           try {
             win == null ? void 0 : win.webContents.send("summary-ready", { sessionDir: summarySessionDir, summaryPath: summaryOut, text: summaryText });
           } catch (e) {

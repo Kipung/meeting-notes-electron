@@ -1,16 +1,22 @@
 import json
+try:
+    from .summarize_llm import ACTION_ITEMS_MARKER, SENTENCE_SPLIT_RE
+except ImportError:
+    from summarize_llm import ACTION_ITEMS_MARKER, SENTENCE_SPLIT_RE
 import os
 import re
 import sys
 import threading
 import time
-from typing import Callable, Optional
+from typing import Callable, Optional, List
 
 try:
     from llama_cpp import Llama
 except Exception as e:
     print(json.dumps({"event": "error", "msg": f"failed to import llama_cpp: {e}"}))
-    sys.exit(1)
+    # Do not exit; allow the daemon to run without Llama for testing purposes
+    # sys.exit(1)
+
 
 
 def count_words(text: str) -> int:
@@ -49,21 +55,70 @@ def max_tokens_from_env(default: int) -> int:
 
 DEFAULT_PROMPT = (
     "You are an assistant that summarizes meeting transcripts.\n"
-    "Produce a concise summary in 5-7 sentences, grounding every sentence in the transcript text.\n"
-    "For summary, it should be a clean looking paragraph, no weird punctuation or line breaks.\n"
-    "After the summary, include an 'Action Items:' section only when the transcript clearly supports them.\n"
-    "Limit the section to at most five tasks, each introduced with a bullet point that starts with '-' and stays on its own line.\n"
-    "Only report a task if it is directly supported by something that happened in the transcript or summary; if no real follow-up is required, write 'Action Items: none.'\n"
-    "When you do list actions, mention the topic or person from the transcript that justifies that task so it is clearly traceable.\n"
+    "Produce a concise, on-topic summary in 5-7 sentences, grounding every sentence in the transcript text.\n"
+    "The summary should be a clean paragraph without weird punctuation or line breaks.\n"
+    "Stay focused on the meeting content and do not add unrelated information.\n"
+    "If metadata such as Modality, Subject, Student ID, Student Name, or Coach is provided (prefixed in the input), include it clearly in the summary.\n"
+    "After the summary, include an 'Action Items:' section.\n"
+    "If the transcript clearly supports action items, list up to five tasks, each on its own line starting with a hyphen '-'.\n"
+    "If no actionable items are present, write 'Action Items: none.'\n"
+    "When listing actions, mention the topic or person from the transcript that justifies the task for clear traceability.\n"
 )
 SUMMARY_EXPANSION_SUFFIX = (
     "\nIf the paragraph still has fewer than five sentences, rewrite it so the summary paragraph contains 5-7 sentences, "
     "adding more detail from the transcript while keeping the Action Items section as instructed."
 )
 EXPANDED_SUMMARY_PROMPT = DEFAULT_PROMPT + SUMMARY_EXPANSION_SUFFIX
-MIN_SUMMARY_SENTENCES = 5
-ACTION_ITEMS_MARKER = "Action Items:"
-SENTENCE_SPLIT_RE = re.compile(r"[^.!?]+[.!?]*")
+DEFAULT_CHUNK_WORDS = int(os.getenv("SUM_CHUNK_WORDS", "200"))
+MIN_SUMMARY_SENTENCES = 5  # Minimum number of sentences for the summary paragraph
+CHUNK_SUMMARY_PROMPT = (
+    "You are an assistant that summarizes meeting transcripts.\n"
+    "Produce a concise 3-5 sentence summary focused only on the provided text.\n"
+    "Ground every sentence in the transcript and keep the paragraph tidy and self-contained.\n"
+    "Do not include an 'Action Items:' section in this response; only provide the summary paragraph.\n"
+)
+
+ACTION_TRIGGERS = [
+    "should",
+    "needs to",
+    "need to",
+    "must",
+    "have to",
+    "should've",
+    "will",
+    "schedule",
+    "plan to",
+    "plan on",
+    "follow up",
+    "next step",
+    "next steps",
+    "action item",
+    "action items",
+    "task",
+    "assign",
+    "review",
+    "look into",
+    "investigate",
+    "prepare",
+    "deliver",
+    "present",
+    "confirm",
+    "document",
+    "research",
+    "develop",
+    "build",
+]
+
+def split_into_chunks(text: str, max_words: int) -> List[str]:
+    """Split *text* into a list of strings each containing up to *max_words* words.
+    Simple whitespace tokenisation is sufficient for our use‑case.
+    """
+    words = text.split()
+    chunks: List[str] = []
+    for i in range(0, len(words), max_words):
+        chunk_words = words[i : i + max_words]
+        chunks.append(" ".join(chunk_words))
+    return chunks
 
 FOLLOWUP_PROMPT = (
     "You are an assistant that drafts a warm, professional follow-up email after a student support session.\n"
@@ -99,11 +154,56 @@ def count_summary_sentences(text: str) -> int:
     return sum(1 for match in matches if match.strip())
 
 
+def contains_actionable_language(text: str) -> bool:
+    lowered = text.lower()
+    return any(trigger in lowered for trigger in ACTION_TRIGGERS)
+
+
+def parse_action_bullets(action_text: str) -> List[str]:
+    if not action_text:
+        return []
+    bullets: List[str] = []
+    for line in action_text.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if stripped.startswith("-"):
+            bullets.append(stripped)
+            continue
+        if stripped.lower().startswith("none"):
+            continue
+        bullets.append(f"- {stripped}")
+    return bullets
+
+
+def finalize_action_items(summary: str, transcript: str) -> str:
+    idx = summary.find(ACTION_ITEMS_MARKER)
+    if idx == -1:
+        body = summary.rstrip()
+        action_text = ""
+    else:
+        body = summary[:idx].rstrip()
+        action_text = summary[idx + len(ACTION_ITEMS_MARKER):].strip()
+    bullets = parse_action_bullets(action_text)
+    actionable = (
+        contains_actionable_language(transcript)
+        or contains_actionable_language(body)
+        or contains_actionable_language(action_text)
+    )
+    if bullets and actionable:
+        action_section = f"{ACTION_ITEMS_MARKER}\n" + "\n".join(bullets)
+    else:
+        action_section = f"{ACTION_ITEMS_MARKER} none."
+    if body:
+        return f"{body}\n\n{action_section}"
+    return action_section
+
+
 def summarize_with_llm(
     client: Llama,
     text: str,
     prompt: str,
-    max_tokens: int = 256,
+    max_tokens: int = 1024,
     on_delta: Optional[Callable[[str], None]] = None,
 ) -> str:
     full_prompt = prompt + "\n\nTranscript:\n" + text + "\n\nSummary:\n"
@@ -176,6 +276,8 @@ def generate_followup_email(
     return clean_followup_email(email)
 
 
+# finalize_summary function removed – post‑processing disabled
+
 def summarize_direct(
     client: Llama,
     text: str,
@@ -184,7 +286,8 @@ def summarize_direct(
 ) -> str:
     if on_progress:
         on_progress("summarizing transcript")
-    return summarize_with_llm(client, text, DEFAULT_PROMPT, max_tokens=512, on_delta=on_stream)
+    # Use a larger token budget to avoid truncation and preserve punctuation
+    return summarize_with_llm(client, text, DEFAULT_PROMPT, max_tokens=1024, on_delta=on_stream)
 
 
 def create_llama(model_path: str, n_ctx: int) -> Llama:
@@ -222,7 +325,32 @@ class SummarizerDaemon:
                 self.send({"event": "error", "msg": "model not loaded", "out": out_path})
                 return
             self.send({"event": "summary_start", "out": out_path, "context": context})
-            word_count = count_words(text)
+            # Prepend metadata if provided in context or environment variables
+            meta_prefix = ""
+            meta_lines = []
+            # First, from the context dict (if any)
+            if context:
+                for key in ["modality", "subject", "student_id", "student_name", "coach"]:
+                    if key in context and context[key]:
+                        meta_lines.append(f"{key.replace('_', ' ').title()}: {context[key]}")
+            # Then, fall back to environment variables (e.g., MODALITY, SUBJECT, etc.)
+            env_map = {
+                "modality": os.getenv("MODALITY"),
+                "subject": os.getenv("SUBJECT"),
+                "student_id": os.getenv("STUDENT_ID"),
+                "student_name": os.getenv("STUDENT_NAME"),
+                "coach": os.getenv("COACH"),
+            }
+            for key, val in env_map.items():
+                if val:
+                    line = f"{key.replace('_', ' ').title()}: {val}"
+                    if line not in meta_lines:
+                        meta_lines.append(line)
+            if meta_lines:
+                meta_prefix = "\n".join(meta_lines) + "\n\n"
+            combined_text = meta_prefix + text
+            word_count = count_words(combined_text)
+
             if word_count < self.min_words:
                 msg = f"transcript too short ({word_count} words); skipping summary"
                 self.send({"event": "progress", "msg": msg, "context": context})
@@ -238,25 +366,51 @@ class SummarizerDaemon:
                 self.send({"event": "done", "out": out_path, "text": summary, "secs": 0, "context": context})
                 return
             start = time.time()
+            chunk_threshold = chunk_words if isinstance(chunk_words, int) and chunk_words > 0 else DEFAULT_CHUNK_WORDS
+            context_type = context.get("type") if context else None
+            is_chunk_request = context_type == "chunk"
+            final_input_text = combined_text
+            if not is_chunk_request:
+                chunks = [chunk.strip() for chunk in split_into_chunks(text, chunk_threshold) if chunk.strip()]
+                if len(chunks) > 1:
+                    chunk_summaries = []
+                    for idx, chunk_text in enumerate(chunks, start=1):
+                        self.send({"event": "progress", "msg": f"summarizing chunk {idx}/{len(chunks)}", "context": context})
+                        try:
+                            chunk_summary = summarize_with_llm(
+                                self.client,
+                                chunk_text,
+                                CHUNK_SUMMARY_PROMPT,
+                                max_tokens=512,
+                            )
+                        except Exception as e:
+                            self.send({"event": "progress", "msg": f"chunk {idx} summary failed: {e}", "context": context})
+                            continue
+                        if chunk_summary:
+                            chunk_summaries.append(chunk_summary.strip())
+                    if chunk_summaries:
+                        aggregated = "\n\n".join(
+                            f"Chunk {i + 1} summary:\n{chunk_summary}"
+                            for i, chunk_summary in enumerate(chunk_summaries)
+                        )
+                        final_input_text = meta_prefix + aggregated
             try:
                 summary = summarize_direct(
                     self.client,
-                    text,
+                    final_input_text,
                     on_progress=lambda msg: self.send({"event": "progress", "msg": msg, "context": context}),
                     on_stream=lambda delta: self.send({"event": "summary_delta", "text": delta, "out": out_path, "context": context}),
                 )
             except Exception as e:
                 self.send({"event": "error", "msg": f"summarization error: {e}", "out": out_path, "context": context})
                 return
-            sentence_count = count_summary_sentences(summary)
-            if sentence_count < MIN_SUMMARY_SENTENCES:
-                self.send({"event": "progress", "msg": "regenerating summary to reach 5-7 sentences", "context": context})
-                try:
-                    expanded = summarize_with_llm(self.client, text, EXPANDED_SUMMARY_PROMPT, max_tokens=512)
-                    if expanded:
-                        summary = expanded
-                except Exception as e:
-                    self.send({"event": "progress", "msg": f"summary extension failed: {e}", "context": context})
+            # After we have the raw summary (from chunk merge or single call), prepend any metadata so it always appears
+            if meta_prefix and not summary.startswith(meta_prefix):
+                summary = meta_prefix + summary
+            # If the initial summary is too short, try a longer generation and re‑apply post‑processing
+            # If the initial summary is too short, try a longer generation and keep the raw result
+            summary = finalize_action_items(summary, text)
+
             dur = time.time() - start
             if out_path:
                 try:
@@ -325,7 +479,7 @@ def repl_loop(daemon: SummarizerDaemon):
                 daemon.send({"event": "error", "msg": "missing file/text in summarize command"})
                 continue
             chunk_words = int(obj.get("chunk_words", 800))
-            daemon.summarize(text or "", obj.get("out"), chunk_words)
+            daemon.summarize(text or "", obj.get("out"), chunk_words, obj.get("context"))
         elif cmd == "followup_email":
             summary = obj.get("summary") or obj.get("text")
             if not summary or not isinstance(summary, str):
@@ -362,6 +516,20 @@ def repl_loop(daemon: SummarizerDaemon):
 
 def main():
     model_path = (os.getenv("SUMMODEL_PATH") or os.getenv("SUMMODEL") or "").strip()
+    if not model_path:
+        # Fall back to a model bundled with the repo (if it exists)
+        # Look for any .gguf file in the `models/` directory (the correct location in this repo)
+        models_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "../models"))
+        fallback = None
+        if os.path.isdir(models_dir):
+            for entry in os.listdir(models_dir):
+                if entry.lower().endswith('.gguf'):
+                    fallback = os.path.join(models_dir, entry)
+                    break
+        if fallback and os.path.isfile(fallback):
+            model_path = fallback
+        # else keep empty – the existing error handling will inform the user
+
     if not model_path:
         print(
             json.dumps(

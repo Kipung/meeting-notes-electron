@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import './App.css'
 
 const MODEL_CHOICES = ['tiny.en', 'small.en', 'base.en', 'medium.en']
-const DEFAULT_WHISPER_MODEL = 'small.en'
+const DEFAULT_WHISPER_MODEL = 'medium.en'
 type StepState = 'idle' | 'running' | 'paused' | 'done' | 'error'
 const STEP_COLORS: Record<StepState, string> = {
   idle: '#9e9e9e',
