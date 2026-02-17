@@ -1,4 +1,6 @@
-import { contextBridge, ipcRenderer } from 'electron'
+import * as electron from 'electron'
+
+const { contextBridge, ipcRenderer } = electron
 
 const onChannel = (channel: string, cb: (ev: any, data: any) => void) => {
   ipcRenderer.on(channel, cb)
@@ -27,4 +29,7 @@ contextBridge.exposeInMainWorld('backend', {
   onSummaryStream: (cb: (ev: any, data: any) => void) => onChannel('summary-stream', cb),
   onBootstrapStatus: (cb: (ev: any, data: any) => void) => onChannel('bootstrap-status', cb),
   processRecording: () => ipcRenderer.invoke('process-recording'),
+  processTranscriptFile: () => ipcRenderer.invoke('process-transcript-file'),
+  summarizeTranscriptText: (text: string) => ipcRenderer.invoke('summarize-transcript-text', { text }),
+  processInputPath: (inputPath: string) => ipcRenderer.invoke('process-input-path', inputPath),
 })

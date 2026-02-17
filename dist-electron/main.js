@@ -1,4 +1,4 @@
-import { ipcMain, dialog, app, BrowserWindow } from "electron";
+import * as electron from "electron";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { randomUUID } from "node:crypto";
@@ -26,6 +26,8 @@ let setupPromise = null;
 let downloadedSummaryModelPath = null;
 const followUpRequests = /* @__PURE__ */ new Map();
 const CHUNK_WORD_THRESHOLD = 600;
+const AUDIO_FILE_EXTENSIONS = /* @__PURE__ */ new Set([".wav", ".mp3", ".m4a", ".flac", ".aac", ".ogg", ".webm"]);
+const TRANSCRIPT_FILE_EXTENSIONS = /* @__PURE__ */ new Set([".txt", ".md", ".markdown", ".srt", ".vtt", ".log", ".json"]);
 let chunkQueue = [];
 let chunkProcessing = false;
 let nextChunkId = 0;
@@ -39,6 +41,7 @@ let chunkSummariesSession = null;
 let pendingFinalSummarySession = null;
 let fileTranscribeProcess = null;
 let fileTranscribeStdoutBuf = "";
+const { app, BrowserWindow, ipcMain, dialog } = electron;
 function getUserDataRoot() {
   return app.getPath("userData");
 }
@@ -125,6 +128,12 @@ function getPackagedFfmpegDir() {
 function getPackagedLibDir() {
   return path.join(process.resourcesPath, "lib");
 }
+function getTorchCacheRoot() {
+  return path.join(getUserDataRoot(), "torch_cache");
+}
+function getPackagedTorchCacheRoot() {
+  return path.join(process.resourcesPath, "torch_cache");
+}
 function getFfmpegPathFromDir(dir) {
   return process.platform === "win32" ? path.join(dir, "ffmpeg.exe") : path.join(dir, "ffmpeg");
 }
@@ -133,7 +142,23 @@ function resolveFfmpegPath() {
   if (override && override.trim() && fs.existsSync(override)) return override;
   const packaged = getFfmpegPathFromDir(getPackagedFfmpegDir());
   if (fs.existsSync(packaged)) return packaged;
+  const devBundled = getFfmpegPathFromDir(path.join(process.env.APP_ROOT, "ffmpeg"));
+  if (fs.existsSync(devBundled)) return devBundled;
   return null;
+}
+function ensureTorchCacheReady() {
+  const userCache = getTorchCacheRoot();
+  fs.mkdirSync(userCache, { recursive: true });
+  const packagedCache = getPackagedTorchCacheRoot();
+  if (!fs.existsSync(packagedCache)) return userCache;
+  const userEntries = fs.readdirSync(userCache);
+  if (userEntries.length > 0) return userCache;
+  try {
+    fs.cpSync(packagedCache, userCache, { recursive: true, force: true });
+  } catch (e) {
+    console.error("failed to seed torch cache", e);
+  }
+  return userCache;
 }
 function getBackendRoot() {
   const override = process.env["BACKEND_ROOT"];
@@ -150,6 +175,23 @@ function getBundledPythonPath() {
 function getUserPythonPath() {
   return process.platform === "win32" ? path.join(getUserDataRoot(), "python", "python.exe") : path.join(getUserDataRoot(), "python", "bin", "python3");
 }
+function getActiveEnvPythonPath() {
+  var _a, _b;
+  const candidates = [];
+  const venv = (_a = process.env["VIRTUAL_ENV"]) == null ? void 0 : _a.trim();
+  const conda = (_b = process.env["CONDA_PREFIX"]) == null ? void 0 : _b.trim();
+  if (process.platform === "win32") {
+    if (venv) candidates.push(path.join(venv, "Scripts", "python.exe"));
+    if (conda) candidates.push(path.join(conda, "python.exe"));
+  } else {
+    if (venv) candidates.push(path.join(venv, "bin", "python"));
+    if (conda) candidates.push(path.join(conda, "bin", "python"));
+  }
+  for (const candidate of candidates) {
+    if (fs.existsSync(candidate)) return candidate;
+  }
+  return null;
+}
 function getPythonCommand() {
   const override = process.env["MEETING_NOTES_PYTHON"];
   if (override && override.trim()) return override;
@@ -157,10 +199,13 @@ function getPythonCommand() {
   if (fs.existsSync(bundled)) return bundled;
   const userBundled = getUserPythonPath();
   if (fs.existsSync(userBundled)) return userBundled;
+  const activeEnvPython = getActiveEnvPythonPath();
+  if (activeEnvPython) return activeEnvPython;
   return process.platform === "win32" ? "python" : "python3";
 }
 function getPythonEnv() {
   const env = { ...process.env, WHISPER_ROOT: getWhisperRoot() };
+  env.TORCH_HOME = env.TORCH_HOME || ensureTorchCacheReady();
   const ffmpegPath = resolveFfmpegPath();
   if (ffmpegPath) {
     env.FFMPEG_PATH = env.FFMPEG_PATH || ffmpegPath;
@@ -484,16 +529,17 @@ async function ensureWhisperModel() {
   const model = process.env["WHISPER_MODEL"] || "small.en";
   const whisperDir = getWhisperRoot();
   const modelPath = path.join(whisperDir, `${model}.pt`);
-  if (fs.existsSync(modelPath)) return;
-  const packagedModelPath = path.join(getPackagedWhisperRoot(), `${model}.pt`);
-  if (fs.existsSync(packagedModelPath)) {
-    fs.mkdirSync(whisperDir, { recursive: true });
-    fs.copyFileSync(packagedModelPath, modelPath);
-    return;
+  if (!fs.existsSync(modelPath)) {
+    const packagedModelPath = path.join(getPackagedWhisperRoot(), `${model}.pt`);
+    if (fs.existsSync(packagedModelPath)) {
+      fs.mkdirSync(whisperDir, { recursive: true });
+      fs.copyFileSync(packagedModelPath, modelPath);
+    }
   }
-  if (app.isPackaged) {
+  if (!fs.existsSync(modelPath) && app.isPackaged) {
     throw new Error(`whisper model missing in installer: ${model}.pt`);
   }
+  if (app.isPackaged) return;
   await runSetupScript(model, whisperDir);
 }
 function resolveSummaryModelPath() {
@@ -571,6 +617,7 @@ async function ensureDependencies() {
   setupState = "running";
   setupPromise = (async () => {
     try {
+      ensureTorchCacheReady();
       await verifyFfmpegAvailable();
       await ensurePythonRuntime();
       await ensureWhisperModel();
@@ -810,6 +857,16 @@ function handleRecordOutput(data) {
         handleTranscriptReady(outPath, text);
         continue;
       }
+      if (obj.event === "error") {
+        const message = obj.msg || "recording error";
+        console.error("[backend recorder error]", message);
+        try {
+          win == null ? void 0 : win.webContents.send("transcription-status", { state: "error", sessionDir: currentSessionDir, message });
+        } catch (e) {
+          console.error("failed to send transcription-status recorder error", e);
+        }
+        continue;
+      }
     } catch {
       continue;
     }
@@ -851,75 +908,36 @@ function makeSessionDir() {
   fs.mkdirSync(sessionDir, { recursive: true });
   return sessionDir;
 }
-async function startBackend() {
-  if (backendProcess) {
-    console.log("[backend] already running");
-    return;
-  }
-  const ready = await ensureDependencies();
-  if (!ready) return;
-  recordStdoutBuf = "";
-  try {
-    win == null ? void 0 : win.webContents.send("recording-ready", { ready: false });
-  } catch (e) {
-    console.error("failed to send recording-ready false", e);
-  }
-  const scriptPath = path.join(getBackendRoot(), "record_and_transcribe.py");
-  const env = { ...getPythonEnv(), WHISPER_MODEL: currentModelName };
-  startSummarizerIfNeeded(resolveSummaryModelPath());
-  backendProcess = spawn(getPythonCommand(), [scriptPath], {
-    stdio: ["pipe", "pipe", "pipe"],
-    env
-  });
-  if (backendProcess.stdout) backendProcess.stdout.on("data", (data) => {
-    handleRecordOutput(data);
-  });
-  else console.error("[backend] stdout not available");
-  if (backendProcess.stderr) backendProcess.stderr.on("data", (data) => {
-    console.error("[backend err]", data.toString().trim());
-  });
-  else console.error("[backend] stderr not available");
-  backendProcess.on("error", (err) => {
-    console.error("[backend spawn error]", err);
-    try {
-      win == null ? void 0 : win.webContents.send("transcription-status", { state: "error", sessionDir: currentSessionDir, message: "failed to start recorder" });
-    } catch (e) {
-      console.error("failed to send transcription-status spawn error", e);
-    }
-  });
-  backendProcess.on("exit", (code) => {
-    console.log("[backend] exited with code", code);
-    backendProcess = null;
-    try {
-      win == null ? void 0 : win.webContents.send("recording-ready", { ready: false });
-    } catch (e) {
-      console.error("failed to send recording-ready false", e);
-    }
-  });
+function classifyInputFile(filePath) {
+  const ext = path.extname(filePath).toLowerCase();
+  if (AUDIO_FILE_EXTENSIONS.has(ext)) return "audio";
+  if (TRANSCRIPT_FILE_EXTENSIONS.has(ext)) return "transcript";
+  return null;
 }
-async function processUploadedRecording() {
-  if (fileTranscribeProcess) {
-    return { ok: false, error: "Already processing a recording" };
+function readTranscriptTextFromFile(filePath) {
+  const raw = fs.readFileSync(filePath, "utf-8");
+  if (path.extname(filePath).toLowerCase() !== ".json") return raw;
+  try {
+    const parsed = JSON.parse(raw);
+    if (typeof parsed === "string") return parsed;
+    if (parsed && typeof parsed === "object") {
+      const obj = parsed;
+      if (typeof obj.text === "string") return obj.text;
+      if (typeof obj.transcript === "string") return obj.transcript;
+      if (Array.isArray(obj.segments)) {
+        const lines = obj.segments.map((seg) => {
+          if (!seg || typeof seg !== "object") return "";
+          const text = seg.text;
+          return typeof text === "string" ? text.trim() : "";
+        }).filter(Boolean);
+        if (lines.length > 0) return lines.join("\n");
+      }
+    }
+  } catch {
   }
-  if (!win) {
-    return { ok: false, error: "window not ready" };
-  }
-  const ready = await ensureDependencies();
-  if (!ready) {
-    return { ok: false, error: "setup not ready" };
-  }
-  const dialogResult = await dialog.showOpenDialog(win, {
-    title: "Select a recording",
-    properties: ["openFile"],
-    filters: [
-      { name: "Audio", extensions: ["wav", "mp3", "m4a", "flac", "aac", "ogg", "webm"] },
-      { name: "All files", extensions: ["*"] }
-    ]
-  });
-  if (dialogResult.canceled || dialogResult.filePaths.length === 0) {
-    return { ok: false, error: "no file selected" };
-  }
-  const audioPath = dialogResult.filePaths[0];
+  return raw;
+}
+function startImportedSession() {
   resetChunkSummariesState();
   const sessionDir = makeSessionDir();
   currentSessionDir = sessionDir;
@@ -927,8 +945,41 @@ async function processUploadedRecording() {
   try {
     win == null ? void 0 : win.webContents.send("session-started", { sessionDir, sessionsRoot: getSessionsRoot() });
   } catch (e) {
-    console.error("failed to send session-started for file upload", e);
+    console.error("failed to send session-started for imported input", e);
   }
+  return sessionDir;
+}
+async function ensureSummarizerRuntime() {
+  try {
+    await ensurePythonRuntime();
+    const summaryModelPath = await ensureSummaryModel();
+    if (!summaryModelPath) {
+      return { ok: false, error: "summary model not found" };
+    }
+    startSummarizerIfNeeded(summaryModelPath);
+    if (!summarizerProcess) {
+      return { ok: false, error: "summarizer not running" };
+    }
+    return { ok: true };
+  } catch (e) {
+    return { ok: false, error: e instanceof Error ? e.message : "failed to prepare summarizer" };
+  }
+}
+async function processRecordingFromPath(audioPath) {
+  if (fileTranscribeProcess) {
+    return { ok: false, error: "Already processing a recording" };
+  }
+  if (!win) {
+    return { ok: false, error: "window not ready" };
+  }
+  if (!fs.existsSync(audioPath)) {
+    return { ok: false, error: `audio file not found: ${audioPath}` };
+  }
+  const ready = await ensureDependencies();
+  if (!ready) {
+    return { ok: false, error: "setup not ready" };
+  }
+  const sessionDir = startImportedSession();
   const destAudio = path.join(sessionDir, path.basename(audioPath));
   try {
     fs.copyFileSync(audioPath, destAudio);
@@ -988,6 +1039,132 @@ async function processUploadedRecording() {
     fileTranscribeProcess = null;
   });
   return { ok: true };
+}
+async function processTranscriptText(text) {
+  if (!win) {
+    return { ok: false, error: "window not ready" };
+  }
+  const trimmed = text.trim();
+  if (!trimmed) {
+    return { ok: false, error: "transcript text is empty" };
+  }
+  const ready = await ensureSummarizerRuntime();
+  if (!ready.ok) return ready;
+  const sessionDir = startImportedSession();
+  const transcriptPath = path.join(sessionDir, "transcript.txt");
+  try {
+    fs.writeFileSync(transcriptPath, trimmed, "utf-8");
+  } catch (e) {
+    return { ok: false, error: `failed to write transcript: ${e instanceof Error ? e.message : String(e)}` };
+  }
+  try {
+    win == null ? void 0 : win.webContents.send("transcription-status", { state: "running", sessionDir, message: "processing transcript text" });
+  } catch (e) {
+    console.error("failed to send transcription-status running for transcript text", e);
+  }
+  handleTranscriptReady(transcriptPath, trimmed);
+  return { ok: true };
+}
+async function processTranscriptFromPath(transcriptPath) {
+  if (!fs.existsSync(transcriptPath)) {
+    return { ok: false, error: `transcript file not found: ${transcriptPath}` };
+  }
+  let text = "";
+  try {
+    text = readTranscriptTextFromFile(transcriptPath);
+  } catch (e) {
+    return { ok: false, error: `failed to read transcript: ${e instanceof Error ? e.message : String(e)}` };
+  }
+  return processTranscriptText(text);
+}
+async function processInputPath(inputPath) {
+  if (!inputPath || typeof inputPath !== "string") {
+    return { ok: false, error: "file path is required" };
+  }
+  const resolvedPath = path.resolve(inputPath);
+  if (!fs.existsSync(resolvedPath)) {
+    return { ok: false, error: `file not found: ${resolvedPath}` };
+  }
+  const kind = classifyInputFile(resolvedPath);
+  if (kind === "audio") return processRecordingFromPath(resolvedPath);
+  if (kind === "transcript") return processTranscriptFromPath(resolvedPath);
+  return { ok: false, error: "unsupported file type; use audio or text transcript files" };
+}
+async function startBackend() {
+  if (backendProcess) {
+    console.log("[backend] already running");
+    return;
+  }
+  const ready = await ensureDependencies();
+  if (!ready) return;
+  recordStdoutBuf = "";
+  try {
+    win == null ? void 0 : win.webContents.send("recording-ready", { ready: false });
+  } catch (e) {
+    console.error("failed to send recording-ready false", e);
+  }
+  const scriptPath = path.join(getBackendRoot(), "record_and_transcribe.py");
+  const env = { ...getPythonEnv(), WHISPER_MODEL: currentModelName };
+  startSummarizerIfNeeded(resolveSummaryModelPath());
+  backendProcess = spawn(getPythonCommand(), [scriptPath], {
+    stdio: ["pipe", "pipe", "pipe"],
+    env
+  });
+  if (backendProcess.stdout) backendProcess.stdout.on("data", (data) => {
+    handleRecordOutput(data);
+  });
+  else console.error("[backend] stdout not available");
+  if (backendProcess.stderr) backendProcess.stderr.on("data", (data) => {
+    console.error("[backend err]", data.toString().trim());
+  });
+  else console.error("[backend] stderr not available");
+  backendProcess.on("error", (err) => {
+    console.error("[backend spawn error]", err);
+    try {
+      win == null ? void 0 : win.webContents.send("transcription-status", { state: "error", sessionDir: currentSessionDir, message: "failed to start recorder" });
+    } catch (e) {
+      console.error("failed to send transcription-status spawn error", e);
+    }
+  });
+  backendProcess.on("exit", (code) => {
+    console.log("[backend] exited with code", code);
+    backendProcess = null;
+    try {
+      win == null ? void 0 : win.webContents.send("recording-ready", { ready: false });
+    } catch (e) {
+      console.error("failed to send recording-ready false", e);
+    }
+  });
+}
+async function processUploadedRecording() {
+  if (!win) return { ok: false, error: "window not ready" };
+  const dialogResult = await dialog.showOpenDialog(win, {
+    title: "Select a recording",
+    properties: ["openFile"],
+    filters: [
+      { name: "Audio", extensions: ["wav", "mp3", "m4a", "flac", "aac", "ogg", "webm"] },
+      { name: "All files", extensions: ["*"] }
+    ]
+  });
+  if (dialogResult.canceled || dialogResult.filePaths.length === 0) {
+    return { ok: false, error: "no file selected" };
+  }
+  return processRecordingFromPath(dialogResult.filePaths[0]);
+}
+async function processUploadedTranscript() {
+  if (!win) return { ok: false, error: "window not ready" };
+  const dialogResult = await dialog.showOpenDialog(win, {
+    title: "Select a transcript",
+    properties: ["openFile"],
+    filters: [
+      { name: "Transcript", extensions: ["txt", "md", "markdown", "srt", "vtt", "log", "json"] },
+      { name: "All files", extensions: ["*"] }
+    ]
+  });
+  if (dialogResult.canceled || dialogResult.filePaths.length === 0) {
+    return { ok: false, error: "no file selected" };
+  }
+  return processTranscriptFromPath(dialogResult.filePaths[0]);
 }
 function stopBackend() {
   if (!backendProcess) {
@@ -1099,6 +1276,30 @@ ipcMain.handle("process-recording", async () => {
   } catch (e) {
     console.error("[process-recording] failed", e);
     return { ok: false, error: e instanceof Error ? e.message : "failed to process recording" };
+  }
+});
+ipcMain.handle("process-transcript-file", async () => {
+  try {
+    return await processUploadedTranscript();
+  } catch (e) {
+    console.error("[process-transcript-file] failed", e);
+    return { ok: false, error: e instanceof Error ? e.message : "failed to process transcript file" };
+  }
+});
+ipcMain.handle("summarize-transcript-text", async (_evt, payload = {}) => {
+  try {
+    return await processTranscriptText(typeof payload.text === "string" ? payload.text : "");
+  } catch (e) {
+    console.error("[summarize-transcript-text] failed", e);
+    return { ok: false, error: e instanceof Error ? e.message : "failed to summarize transcript text" };
+  }
+});
+ipcMain.handle("process-input-path", async (_evt, inputPath) => {
+  try {
+    return await processInputPath(inputPath);
+  } catch (e) {
+    console.error("[process-input-path] failed", e);
+    return { ok: false, error: e instanceof Error ? e.message : "failed to process input file" };
   }
 });
 ipcMain.handle("generate-followup-email", async (_evt, payload = {}) => {

@@ -77,6 +77,22 @@ if (!fs.existsSync(whisperFile)) {
   errors.push(`missing whisper model file: ${whisperFile}`)
 }
 
+const torchCacheDir = path.join(root, 'torch_cache')
+if (!fs.existsSync(torchCacheDir)) {
+  errors.push(`missing torch cache directory: ${torchCacheDir}`)
+} else {
+  const torchHubDir = path.join(torchCacheDir, 'hub')
+  if (!fs.existsSync(torchHubDir)) {
+    errors.push(`missing torch hub cache: ${torchHubDir}`)
+  } else {
+    const entries = fs.readdirSync(torchHubDir)
+    const hasSilero = entries.some((name) => name.toLowerCase().includes('silero-vad'))
+    if (!hasSilero) {
+      errors.push(`missing silero-vad torch hub cache under ${torchHubDir}`)
+    }
+  }
+}
+
 const ffmpegDir = path.join(root, 'ffmpeg')
 const ffmpegBin =
   process.platform === 'win32'

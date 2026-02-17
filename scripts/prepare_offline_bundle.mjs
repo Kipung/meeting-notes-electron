@@ -23,8 +23,11 @@ const ffmpegLibArg = getArg('--ffmpeg-lib') || process.env.FFMPEG_LIB_DIR || nul
 const defaultPythonBin = process.platform === 'win32' ? 'python' : 'python3'
 const pythonBin = pythonBinArg || defaultPythonBin
 
-const runPython = (code) => {
-  const result = spawnSync(pythonBin, ['-c', code], { encoding: 'utf-8' })
+const runPython = (code, env = undefined) => {
+  const result = spawnSync(pythonBin, ['-c', code], {
+    encoding: 'utf-8',
+    env: env ? { ...process.env, ...env } : process.env,
+  })
   if (result.error) {
     throw result.error
   }
@@ -101,6 +104,13 @@ if (!fs.existsSync(whisperDest)) {
   throw new Error(`whisper model not found after preparation: ${whisperDest}`)
 }
 
+const torchCacheDir = path.join(root, 'torch_cache')
+fs.mkdirSync(torchCacheDir, { recursive: true })
+runPython(
+  `import torch; torch.hub.load("snakers4/silero-vad", "silero_vad", trust_repo=True, force_reload=False); print("ok")`,
+  { TORCH_HOME: torchCacheDir }
+)
+
 const resolveFfmpegPath = () => {
   if (ffmpegArg) return ffmpegArg
   if (process.platform === 'win32') {
@@ -166,6 +176,7 @@ if (process.platform === 'darwin' || process.platform === 'linux') {
 console.log('Offline bundle prepared:')
 console.log(`- python: ${destPython}`)
 console.log(`- whisper: ${whisperDest}`)
+console.log(`- torch cache: ${torchCacheDir}`)
 console.log(`- ffmpeg: ${ffmpegDest}`)
 if (libDest) {
   console.log(`- ffmpeg libs: ${libDest}`)

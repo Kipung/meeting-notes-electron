@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useRef, useState, type DragEvent } from 'react'
 import './App.css'
 
 const MODEL_CHOICES = ['tiny.en', 'small.en', 'base.en', 'medium.en']
@@ -64,6 +64,9 @@ function App() {
   const [followUpGenerating, setFollowUpGenerating] = useState(false)
   const [followUpStatus, setFollowUpStatus] = useState('')
   const [processingRecordingFile, setProcessingRecordingFile] = useState(false)
+  const [processingTranscriptFile, setProcessingTranscriptFile] = useState(false)
+  const [summarizingTranscriptText, setSummarizingTranscriptText] = useState(false)
+  const [dropActive, setDropActive] = useState(false)
   const isWindows = /Windows/.test(navigator.userAgent)
 
   const getElapsedSeconds = () => {
@@ -302,13 +305,18 @@ function App() {
   }
 
   const onProcessRecordingFile = async () => {
-    if (processingRecordingFile) return
+    if (processingRecordingFile || processingTranscriptFile || summarizingTranscriptText) return
     setProcessingRecordingFile(true)
     setStatus('transcribing')
-    setStatusDetail('processing uploaded recording...')
+    setStatusDetail('processing uploaded audio...')
     try {
       const res = await (window as any).backend.processRecording()
       if (!res?.ok) {
+        if (res?.error === 'no file selected') {
+          setStatus('idle')
+          setStatusDetail('')
+          return
+        }
         setStatus('transcription-error')
         setStatusDetail(res?.error || 'failed to process recording')
       }
@@ -321,7 +329,106 @@ function App() {
     }
   }
 
+  const onProcessTranscriptFile = async () => {
+    if (processingRecordingFile || processingTranscriptFile || summarizingTranscriptText) return
+    setProcessingTranscriptFile(true)
+    setStatus('transcribing')
+    setStatusDetail('processing uploaded transcript...')
+    try {
+      const res = await (window as any).backend.processTranscriptFile()
+      if (!res?.ok) {
+        if (res?.error === 'no file selected') {
+          setStatus('idle')
+          setStatusDetail('')
+          return
+        }
+        setStatus('transcription-error')
+        setStatusDetail(res?.error || 'failed to process transcript')
+      }
+    } catch (e) {
+      console.error('processTranscriptFile failed', e)
+      setStatus('transcription-error')
+      setStatusDetail('Failed to process transcript file')
+    } finally {
+      setProcessingTranscriptFile(false)
+    }
+  }
+
+  const onSummarizeTranscriptText = async () => {
+    const text = transcript.trim()
+    if (!text) {
+      setStatus('transcription-error')
+      setStatusDetail('Transcript text is empty')
+      return
+    }
+    if (processingRecordingFile || processingTranscriptFile || summarizingTranscriptText) return
+    setSummarizingTranscriptText(true)
+    setStatus('summarizing')
+    setStatusDetail('summarizing current transcript text...')
+    setSummarizationState('running')
+    try {
+      const res = await (window as any).backend.summarizeTranscriptText(text)
+      if (!res?.ok) {
+        setStatus('summary-error')
+        setStatusDetail(res?.error || 'failed to summarize transcript text')
+        setSummarizationState('error')
+      }
+    } catch (e) {
+      console.error('summarizeTranscriptText failed', e)
+      setStatus('summary-error')
+      setStatusDetail('Failed to summarize transcript text')
+      setSummarizationState('error')
+    } finally {
+      setSummarizingTranscriptText(false)
+    }
+  }
+
+  const onDragOverApp = (e: DragEvent<HTMLDivElement>) => {
+    if (!Array.from(e.dataTransfer.types || []).includes('Files')) return
+    e.preventDefault()
+    e.dataTransfer.dropEffect = 'copy'
+    if (!dropActive) setDropActive(true)
+  }
+
+  const onDragLeaveApp = (e: DragEvent<HTMLDivElement>) => {
+    const relatedTarget = e.relatedTarget as Node | null
+    if (relatedTarget && e.currentTarget.contains(relatedTarget)) return
+    setDropActive(false)
+  }
+
+  const onDropApp = async (e: DragEvent<HTMLDivElement>) => {
+    if (!Array.from(e.dataTransfer.types || []).includes('Files')) return
+    e.preventDefault()
+    setDropActive(false)
+    if (running || processingRecordingFile || processingTranscriptFile || summarizingTranscriptText) return
+    const file = e.dataTransfer.files?.[0] as File | undefined
+    const droppedPath = file ? (file as any).path : null
+    if (!droppedPath) {
+      setStatus('transcription-error')
+      setStatusDetail('Dropped file path is unavailable')
+      return
+    }
+    setStatus('transcribing')
+    setStatusDetail('processing dropped file...')
+    setProcessingTranscriptFile(true)
+    try {
+      const res = await (window as any).backend.processInputPath(droppedPath)
+      if (!res?.ok) {
+        setStatus('transcription-error')
+        setStatusDetail(res?.error || 'failed to process dropped file')
+      }
+    } catch (e2) {
+      console.error('processInputPath failed', e2)
+      setStatus('transcription-error')
+      setStatusDetail('Failed to process dropped file')
+    } finally {
+      setProcessingTranscriptFile(false)
+    }
+  }
+
   const canPause = running && (recordingState === 'running' || recordingState === 'paused')
+  const importBusy = processingRecordingFile || processingTranscriptFile || summarizingTranscriptText
+  const canImportFiles = !running && !importBusy
   const canDeleteAudio = Boolean(sessionDir) && transcriptionState === 'done' && recordingState !== 'running' && recordingState !== 'paused'
   const followUpActionLabel = followUpGenerating ? 'Generating...' : followUpEmail ? 'Regenerate from summary' : 'Generate from summary'
   const studentInfo = [studentId ? `Student ID: ${studentId}` : '', studentName ? `Student Name: ${studentName}` : '']
@@ -437,8 +544,13 @@ function App() {
   }
 
   return (
-    <div className="app-shell">
+    <div className="app-shell" onDragOver={onDragOverApp} onDragLeave={onDragLeaveApp} onDrop={onDropApp}>
       <h1 style={{ fontSize: 24, margin: '0 0 10px' }}>Meeting Notes</h1>
+      {dropActive ? (
+        <div style={{ marginBottom: 10, padding: 8, border: '1px dashed #6c6c6c', borderRadius: 6, color: '#d8d8d8' }}>
+          Drop an audio file or transcript file to process.
+        </div>
+      ) : null}
 
       <div className="app-columns">
         <div className="status-card" style={{ textAlign: 'left', border: '1px solid #2f2f2f', borderRadius: 8, padding: 12, background: '#1b1b1b', color: '#f5f5f5' }}>
@@ -690,8 +802,14 @@ function App() {
             <button onClick={() => copyToClipboard(transcript)} disabled={!transcript}>
               Copy transcript
             </button>
-            <button onClick={onProcessRecordingFile} disabled={processingRecordingFile || running}>
-              {processingRecordingFile ? 'Processing...' : 'Process recording file'}
+            <button onClick={onProcessRecordingFile} disabled={!canImportFiles}>
+              {processingRecordingFile ? 'Processing audio...' : 'Process audio file'}
+            </button>
+            <button onClick={onProcessTranscriptFile} disabled={!canImportFiles}>
+              {processingTranscriptFile ? 'Processing transcript...' : 'Process transcript file'}
+            </button>
+            <button onClick={onSummarizeTranscriptText} disabled={running || importBusy || !transcript.trim()}>
+              {summarizingTranscriptText ? 'Summarizing...' : 'Summarize transcript text'}
             </button>
           </div>
           <textarea

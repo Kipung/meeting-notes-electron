@@ -18,6 +18,9 @@ interface Window {
       maxTokens?: number
     }) => Promise<{ ok: boolean; text?: string; error?: string }>
     processRecording: () => Promise<{ ok: boolean; error?: string }>
+    processTranscriptFile: () => Promise<{ ok: boolean; error?: string }>
+    summarizeTranscriptText: (text: string) => Promise<{ ok: boolean; error?: string }>
+    processInputPath: (inputPath: string) => Promise<{ ok: boolean; error?: string }>
     onSession: (cb: (ev: any, data: any) => void) => () => void
     onTranscript: (cb: (ev: any, data: any) => void) => () => void
     onTranscriptionStatus: (cb: (ev: any, data: any) => void) => () => void

@@ -3,6 +3,9 @@ import path from 'node:path'
 import electron from 'vite-plugin-electron/simple'
 import react from '@vitejs/plugin-react'
 
+// Ensure Electron child processes run with Electron APIs even if parent env sets Node-only mode.
+delete process.env.ELECTRON_RUN_AS_NODE
+
 // https://vitejs.dev/config/
 export default defineConfig({
   plugins: [
