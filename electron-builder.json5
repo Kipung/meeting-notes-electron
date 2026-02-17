@@ -32,10 +32,6 @@
       "to": "models"
     },
     {
-      "from": "whisper",
-      "to": "whisper"
-    },
-    {
       "from": "ffmpeg",
       "to": "ffmpeg"
     },

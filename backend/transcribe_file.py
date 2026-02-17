@@ -1,6 +1,7 @@
 import json
 import os
 import sys
+from pathlib import Path
 
 try:
     from faster_whisper import WhisperModel
@@ -13,8 +14,12 @@ def send(obj: dict):
     print(json.dumps(obj), flush=True)
 
 
+def default_whisper_root() -> str:
+    return str(Path(__file__).resolve().parent.parent / "models" / "whisper")
+
+
 def load_model(model_name: str):
-    download_root = os.environ.get("WHISPER_ROOT")
+    download_root = os.environ.get("WHISPER_ROOT") or default_whisper_root()
     for device, compute_type in (("cuda", "float16"), ("cpu", "int8")):
         try:
             model = WhisperModel(
@@ -22,6 +27,7 @@ def load_model(model_name: str):
                 device=device,
                 compute_type=compute_type,
                 download_root=download_root,
+                local_files_only=True,
             )
             # Force backend runtime initialization early so missing CUDA DLLs
             # are handled via fallback before real transcription starts.

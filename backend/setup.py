@@ -1,6 +1,7 @@
 import json
 import os
 import sys
+from pathlib import Path
 
 
 def emit(event: str, message: str, **fields):
@@ -13,7 +14,6 @@ def check_imports():
     emit("status", "checking python dependencies")
     try:
         import faster_whisper  
-        import silero_vad  
         import onnxruntime
         if sys.platform == "win32":
             import pyaudiowpatch as pyaudio
@@ -56,11 +56,23 @@ def ensure_whisper_model(model_name: str, download_root: str = None):
     sys.exit(4)
 
 
-def ensure_vad_model():
-    emit("status", "loading silero VAD model (onnxruntime)")
+def _default_vad_model_path() -> str:
+    return str(Path(__file__).resolve().parent.parent / "models" / "silero_vad.onnx")
+
+
+def ensure_vad_model(vad_model_path: str):
+    emit("status", f"loading silero VAD model via onnxruntime: {vad_model_path}")
+    if not os.path.exists(vad_model_path):
+        emit("error", f"silero VAD model not found: {vad_model_path}")
+        sys.exit(7)
     try:
-        from silero_vad import load_silero_vad
-        load_silero_vad(onnx=True)
+        import onnxruntime as ort
+        _session = ort.InferenceSession(
+            vad_model_path,
+            providers=["CPUExecutionProvider"],
+        )
+        _session.get_inputs()
+        _session.get_outputs()
     except Exception as exc:
         emit("error", f"vad model load failed: {exc}")
         sys.exit(7)
@@ -68,13 +80,14 @@ def ensure_vad_model():
 
 def main():
     whisper_model = os.getenv("WHISPER_MODEL", "small.en")
-    whisper_dir = os.getenv("WHISPER_DIR", "").strip() or None
+    whisper_dir = os.getenv("WHISPER_DIR", "").strip() or str(Path(__file__).resolve().parent.parent / "models" / "whisper")
+    vad_model_path = os.getenv("SILERO_VAD_MODEL", "").strip() or _default_vad_model_path()
     if whisper_dir:
         os.makedirs(whisper_dir, exist_ok=True)
 
     check_imports()
     ensure_whisper_model(whisper_model, whisper_dir)
-    ensure_vad_model()
+    ensure_vad_model(vad_model_path)
     emit("done", "setup complete")
 
 

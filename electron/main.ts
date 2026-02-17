@@ -145,16 +145,40 @@ function getModelsRoot(): string {
   return path.join(getUserDataRoot(), 'models')
 }
 
+function getAppModelsRoot(): string {
+  return path.join(process.env.APP_ROOT!, 'models')
+}
+
 function getPackagedModelsRoot(): string {
   return path.join(process.resourcesPath, 'models')
 }
 
 function getWhisperRoot(): string {
-  return path.join(getUserDataRoot(), 'whisper')
+  const override = process.env['WHISPER_ROOT']
+  if (override && override.trim()) return override
+  const candidates = [
+    path.join(getAppModelsRoot(), 'whisper'),
+    path.join(getPackagedModelsRoot(), 'whisper'),
+    path.join(getModelsRoot(), 'whisper'),
+  ]
+  for (const candidate of candidates) {
+    if (fs.existsSync(candidate)) return candidate
+  }
+  return path.join(getAppModelsRoot(), 'whisper')
 }
 
-function getPackagedWhisperRoot(): string {
-  return path.join(process.resourcesPath, 'whisper')
+function getSileroVadModelPath(): string {
+  const override = process.env['SILERO_VAD_MODEL']
+  if (override && override.trim()) return override
+  const candidates = [
+    path.join(getAppModelsRoot(), 'silero_vad.onnx'),
+    path.join(getPackagedModelsRoot(), 'silero_vad.onnx'),
+    path.join(getModelsRoot(), 'silero_vad.onnx'),
+  ]
+  for (const candidate of candidates) {
+    if (fs.existsSync(candidate)) return candidate
+  }
+  return path.join(getAppModelsRoot(), 'silero_vad.onnx')
 }
 
 function getPackagedFfmpegDir(): string {
@@ -212,7 +236,11 @@ function getPythonCommand(): string {
 }
 
 function getPythonEnv(): NodeJS.ProcessEnv {
-  const env: NodeJS.ProcessEnv = { ...process.env, WHISPER_ROOT: getWhisperRoot() }
+  const env: NodeJS.ProcessEnv = {
+    ...process.env,
+    WHISPER_ROOT: getWhisperRoot(),
+    SILERO_VAD_MODEL: getSileroVadModelPath(),
+  }
   const ffmpegPath = resolveFfmpegPath()
   if (ffmpegPath) {
     env.FFMPEG_PATH = env.FFMPEG_PATH || ffmpegPath
@@ -626,20 +654,11 @@ async function runSetupScript(whisperModel: string, whisperDir: string): Promise
 async function ensureWhisperModel(): Promise<void> {
   const model = process.env['WHISPER_MODEL'] || 'small.en'
   const whisperDir = getWhisperRoot()
-  const modelPath = path.join(whisperDir, `${model}.pt`)
-  if (fs.existsSync(modelPath)) return
+  const repoIdDir = `models--Systran--faster-whisper-${model}`
+  const localCacheDir = path.join(whisperDir, repoIdDir)
+  if (fs.existsSync(localCacheDir)) return
 
-  const packagedModelPath = path.join(getPackagedWhisperRoot(), `${model}.pt`)
-  if (fs.existsSync(packagedModelPath)) {
-    fs.mkdirSync(whisperDir, { recursive: true })
-    fs.copyFileSync(packagedModelPath, modelPath)
-    return
-  }
-
-  if (app.isPackaged) {
-    throw new Error(`whisper model missing in installer: ${model}.pt`)
-  }
-
+  fs.mkdirSync(whisperDir, { recursive: true })
   await runSetupScript(model, whisperDir)
 }
 
