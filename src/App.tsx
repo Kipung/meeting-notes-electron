@@ -4,6 +4,8 @@ import './App.css'
 const MODEL_CHOICES = ['tiny.en', 'small.en', 'base.en', 'medium.en']
 const DEFAULT_WHISPER_MODEL = 'medium.en'
 type StepState = 'idle' | 'running' | 'paused' | 'done' | 'error'
+type DroppedFile = File & { path?: string }
+const backend = window.backend
 const STEP_COLORS: Record<StepState, string> = {
   idle: '#9e9e9e',
   running: '#e67e22',
@@ -28,8 +30,8 @@ const getTodayDateString = () => {
 }
 
 function App() {
-  const [devices, setDevices] = useState<any[]>([])
-  const [loopbackDevices, setLoopbackDevices] = useState<any[]>([])
+  const [devices, setDevices] = useState<BackendDevice[]>([])
+  const [loopbackDevices, setLoopbackDevices] = useState<BackendDevice[]>([])
   const [selectedDevice, setSelectedDevice] = useState<number | null>(null)
   const [selectedLoopback, setSelectedLoopback] = useState<number | null>(null)
   const [model, setModel] = useState<string>(DEFAULT_WHISPER_MODEL)
@@ -77,36 +79,34 @@ function App() {
   }
 
   useEffect(() => {
-    ;(async () => {
+    void (async () => {
       try {
-        const res = await (window as any).backend.listDevices()
-        if (res && res.devices) {
-          const allDevices = res.devices
-          const loopbacks = allDevices.filter((d: any) => d && d.isLoopback)
-          setDevices(allDevices.filter((d: any) => !loopbacks.includes(d)))
-          setLoopbackDevices(loopbacks)
-        }
+        const res = await backend.listDevices()
+        const allDevices = Array.isArray(res?.devices) ? res.devices : []
+        const loopbacks = allDevices.filter((d) => d.isLoopback)
+        setDevices(allDevices.filter((d) => !d.isLoopback))
+        setLoopbackDevices(loopbacks)
       } catch (e) {
         console.error('listDevices failed', e)
       }
     })()
 
-    ;(async () => {
+    void (async () => {
       try {
-        const root = await (window as any).backend.getSessionsRoot()
+        const root = await backend.getSessionsRoot()
         if (root) setSessionsRoot(root)
       } catch (e) {
         console.error('getSessionsRoot failed', e)
       }
     })()
 
-    const offSession = (window as any).backend.onSession((_ev: any, data: any) => {
+    const offSession = backend.onSession((_ev, data) => {
       setSessionDir(data.sessionDir || null)
       if (data.sessionsRoot) setSessionsRoot(data.sessionsRoot)
       setAudioDeleteMessage('')
     })
 
-    const offTranscript = (window as any).backend.onTranscript((_ev: any, data: any) => {
+    const offTranscript = backend.onTranscript((_ev, data) => {
       setTranscript(data.text || '')
       setSessionDir(data.sessionDir || null)
       setStatus('transcript-ready')
@@ -115,26 +115,27 @@ function App() {
       setRunning(false)
     })
 
-    const offTranscriptPartial = (window as any).backend.onTranscriptPartial((_ev: any, data: any) => {
+    const offTranscriptPartial = backend.onTranscriptPartial((_ev, data) => {
       const next = data.fullText || data.text || ''
       if (next) setTranscript(next)
       if (data.sessionDir) setSessionDir(data.sessionDir)
     })
 
-    const offTranscriptionStatus = (window as any).backend.onTranscriptionStatus((_ev: any, data: any) => {
+    const offTranscriptionStatus = backend.onTranscriptionStatus((_ev, data) => {
       const state = data.state === 'starting' || data.state === 'running' ? 'running' : data.state === 'done' ? 'done' : data.state === 'error' ? 'error' : 'idle'
       setTranscriptionState(state)
       if (state === 'running') setStatus('transcribing')
       if (state === 'done') setStatus('transcript-ready')
       if (state === 'error') setStatus('transcription-error')
+      if (state === 'done' || state === 'error') setRunning(false)
       setStatusDetail(data.message || '')
     })
 
-    const offRecordingReady = (window as any).backend.onRecordingReady((_ev: any, data: any) => {
+    const offRecordingReady = backend.onRecordingReady((_ev, data) => {
       setRecorderReady(Boolean(data?.ready))
     })
 
-    const offRecordingStarted = (window as any).backend.onRecordingStarted((_ev: any, data: any) => {
+    const offRecordingStarted = backend.onRecordingStarted((_ev, data) => {
       const startedAtMs = typeof data?.startedAtMs === 'number' ? data.startedAtMs : Date.now()
       recordingStartRef.current = startedAtMs
       pauseStartRef.current = null
@@ -142,7 +143,7 @@ function App() {
       setElapsedSeconds(0)
     })
 
-    const offSummary = (window as any).backend.onSummary((_ev: any, data: any) => {
+    const offSummary = backend.onSummary((_ev, data) => {
       setStatus('summary-ready')
       setStatusDetail('summary ready')
       setSummarizationState('done')
@@ -153,7 +154,7 @@ function App() {
       setFollowUpGenerating(false)
     })
 
-    const offSummaryStream = (window as any).backend.onSummaryStream((_ev: any, data: any) => {
+    const offSummaryStream = backend.onSummaryStream((_ev, data) => {
       if (!data) return
       if (data.reset) {
         setSummary('')
@@ -166,7 +167,7 @@ function App() {
       if (delta) setSummary((prev) => prev + delta)
     })
 
-    const offSummaryStatus = (window as any).backend.onSummaryStatus((_ev: any, data: any) => {
+    const offSummaryStatus = backend.onSummaryStatus((_ev, data) => {
       const state = data.state === 'starting' || data.state === 'running' ? 'running' : data.state === 'done' ? 'done' : data.state === 'error' ? 'error' : 'idle'
       setSummarizationState(state)
       if (state === 'running') setStatus('summarizing')
@@ -175,7 +176,7 @@ function App() {
       setStatusDetail(data.message || '')
     })
 
-    const offBootstrapStatus = (window as any).backend.onBootstrapStatus((_ev: any, data: any) => {
+    const offBootstrapStatus = backend.onBootstrapStatus((_ev, data) => {
       const state = data.state === 'running' ? 'running' : data.state === 'done' ? 'done' : data.state === 'error' ? 'error' : 'idle'
       setSetupState(state)
       setSetupMessage(data.message || '')
@@ -254,8 +255,8 @@ function App() {
     setElapsedSeconds(0)
     setRunning(true)
     setAudioDeleteMessage('')
-    ;(window as any).backend.start({
-      deviceIndex: selectedDevice,
+    backend.start({
+      deviceIndex: selectedDevice ?? undefined,
       loopbackDeviceIndex: selectedLoopback ?? undefined,
       model,
     })
@@ -270,7 +271,7 @@ function App() {
     setStatusDetail('stopping recording')
     setRecordingState('done')
     setTranscriptionState('running')
-    ;(window as any).backend.stop()
+    backend.stop()
   }
 
   const onPauseToggle = () => {
@@ -281,7 +282,7 @@ function App() {
       setStatus('paused')
       setStatusDetail('recording paused')
       setRecordingState('paused')
-      ;(window as any).backend.pause()
+      backend.pause()
       return
     }
     if (recordingState === 'paused') {
@@ -293,7 +294,7 @@ function App() {
       setStatus('recording')
       setStatusDetail('recording audio')
       setRecordingState('running')
-      ;(window as any).backend.resume()
+      backend.resume()
     }
   }
 
@@ -310,7 +311,7 @@ function App() {
     setStatus('transcribing')
     setStatusDetail('processing uploaded audio...')
     try {
-      const res = await (window as any).backend.processRecording()
+      const res = await backend.processRecording()
       if (!res?.ok) {
         if (res?.error === 'no file selected') {
           setStatus('idle')
@@ -335,7 +336,7 @@ function App() {
     setStatus('transcribing')
     setStatusDetail('processing uploaded transcript...')
     try {
-      const res = await (window as any).backend.processTranscriptFile()
+      const res = await backend.processTranscriptFile()
       if (!res?.ok) {
         if (res?.error === 'no file selected') {
           setStatus('idle')
@@ -367,7 +368,7 @@ function App() {
     setStatusDetail('summarizing current transcript text...')
     setSummarizationState('running')
     try {
-      const res = await (window as any).backend.summarizeTranscriptText(text)
+      const res = await backend.summarizeTranscriptText(text)
       if (!res?.ok) {
         setStatus('summary-error')
         setStatusDetail(res?.error || 'failed to summarize transcript text')
@@ -401,8 +402,8 @@ function App() {
     e.preventDefault()
     setDropActive(false)
     if (running || processingRecordingFile || processingTranscriptFile || summarizingTranscriptText) return
-    const file = e.dataTransfer.files?.[0] as File | undefined
-    const droppedPath = file ? (file as any).path : null
+    const file = e.dataTransfer.files?.[0] as DroppedFile | undefined
+    const droppedPath = file?.path ?? null
     if (!droppedPath) {
       setStatus('transcription-error')
       setStatusDetail('Dropped file path is unavailable')
@@ -412,7 +413,7 @@ function App() {
     setStatusDetail('processing dropped file...')
     setProcessingTranscriptFile(true)
     try {
-      const res = await (window as any).backend.processInputPath(droppedPath)
+      const res = await backend.processInputPath(droppedPath)
       if (!res?.ok) {
         setStatus('transcription-error')
         setStatusDetail(res?.error || 'failed to process dropped file')
@@ -493,7 +494,7 @@ function App() {
 
   const onChangeSaveLocation = async () => {
     try {
-      const nextRoot = await (window as any).backend.chooseSessionsRoot()
+      const nextRoot = await backend.chooseSessionsRoot()
       if (nextRoot) setSessionsRoot(nextRoot)
     } catch (e) {
       console.error('chooseSessionsRoot failed', e)
@@ -505,7 +506,7 @@ function App() {
     setFollowUpGenerating(true)
     setFollowUpStatus('Generating follow-up email...')
     try {
-      const res = await (window as any).backend.generateFollowUpEmail({
+      const res = await backend.generateFollowUpEmail({
         summary,
         studentName: studentName.trim() || undefined,
         instructions: followUpInstructions,
@@ -530,7 +531,7 @@ function App() {
     if (!ok) return
     setAudioDeleteMessage('Deleting session audio...')
     try {
-      const res = await (window as any).backend.deleteSessionAudio(sessionDir)
+      const res = await backend.deleteSessionAudio(sessionDir)
       if (res && res.ok) {
         const deletedCount = Array.isArray(res.deleted) ? res.deleted.length : 0
         setAudioDeleteMessage(deletedCount > 0 ? 'Session audio deleted.' : 'No audio files found.')

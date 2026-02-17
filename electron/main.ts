@@ -42,7 +42,13 @@ let recordStdoutBuf = ''
 let setupState: 'idle' | 'running' | 'done' | 'error' = 'idle'
 let setupPromise: Promise<boolean> | null = null
 let downloadedSummaryModelPath: string | null = null
-const followUpRequests = new Map<string, { resolve: (value: any) => void; timeout: NodeJS.Timeout }>()
+type FollowUpResult = { ok: boolean; text?: string; error?: string }
+type SummarizerEvent = {
+  event?: string
+  text?: string
+  msg?: string
+}
+const followUpRequests = new Map<string, { resolve: (value: FollowUpResult) => void; timeout: NodeJS.Timeout }>()
 const CHUNK_WORD_THRESHOLD = 600
 const AUDIO_FILE_EXTENSIONS = new Set(['.wav', '.mp3', '.m4a', '.flac', '.aac', '.ogg', '.webm'])
 const TRANSCRIPT_FILE_EXTENSIONS = new Set(['.txt', '.md', '.markdown', '.srt', '.vtt', '.log', '.json'])
@@ -127,8 +133,18 @@ function resolveSessionDir(sessionDir: string): string | null {
 
 function listSessionAudioPaths(sessionDir: string): string[] {
   const paths: string[] = []
-  const mainAudio = path.join(sessionDir, 'audio.wav')
-  if (fs.existsSync(mainAudio)) paths.push(mainAudio)
+  try {
+    const entries = fs.readdirSync(sessionDir, { withFileTypes: true })
+    for (const entry of entries) {
+      if (!entry.isFile()) continue
+      const ext = path.extname(entry.name).toLowerCase()
+      if (AUDIO_FILE_EXTENSIONS.has(ext)) {
+        paths.push(path.join(sessionDir, entry.name))
+      }
+    }
+  } catch (e) {
+    console.error('failed to read session dir', e)
+  }
 
   const chunksDir = path.join(sessionDir, 'chunks')
   if (fs.existsSync(chunksDir)) {
@@ -405,7 +421,7 @@ function startFinalSummary(fullText: string): void {
 }
 
 function handleChunkSummarizerEvent(
-  obj: any,
+  obj: SummarizerEvent,
   context: { type?: string; id?: number; sessionDir?: string | null } | undefined,
 ): void {
   if (!context || context.type !== 'chunk') return
@@ -601,6 +617,7 @@ async function runSetupScript(whisperModel: string, whisperDir: string): Promise
             sendBootstrapStatus('error', obj.message || 'setup failed')
           }
         } catch {
+          // Ignore non-JSON setup output lines.
         }
       }
     })
@@ -995,7 +1012,7 @@ function handleRecordOutput(data: Buffer) {
     }
 }
 
-function handleFileTranscribeEvent(obj: any) {
+function handleFileTranscribeEvent(obj: SummarizerEvent & { out?: string }) {
   const sessionDir = currentSessionDir
   if (!sessionDir) return
   if (obj.event === 'started') {
@@ -1147,6 +1164,19 @@ async function processRecordingFromPath(audioPath: string): Promise<ProcessResul
   fileTranscribeProcess = spawn(getPythonCommand(), [script], {
     stdio: ['ignore', 'pipe', 'pipe'],
     env,
+  })
+  fileTranscribeProcess.on('error', (err) => {
+    console.error('[file-transcribe spawn error]', err)
+    fileTranscribeProcess = null
+    try {
+      win?.webContents.send('transcription-status', {
+        state: 'error',
+        sessionDir,
+        message: 'failed to start uploaded recording transcription',
+      })
+    } catch (sendErr) {
+      console.error('failed to send transcription-status file-transcribe spawn error', sendErr)
+    }
   })
   if (fileTranscribeProcess.stdout) {
     fileTranscribeProcess.stdout.on('data', (data) => {
@@ -1405,14 +1435,24 @@ ipcMain.handle('list-devices', async () => {
   return new Promise((resolve) => {
     const p = spawn(getPythonCommand(), [script], { stdio: ['ignore', 'pipe', 'pipe'], env: getPythonEnv() })
     let out = ''
-    p.stdout.on('data', (d) => (out += d.toString()))
-    p.stderr.on('data', (d) => console.error('[devices err]', d.toString().trim()))
+    let settled = false
+    const finish = (value: unknown) => {
+      if (settled) return
+      settled = true
+      resolve(value)
+    }
+    p.stdout?.on('data', (d) => (out += d.toString()))
+    p.stderr?.on('data', (d) => console.error('[devices err]', d.toString().trim()))
+    p.on('error', (err) => {
+      console.error('[devices spawn error]', err)
+      finish({ error: `failed to run devices script: ${err.message}` })
+    })
     p.on('exit', () => {
       try {
         const json = JSON.parse(out || '{}')
-        resolve(json)
+        finish(json)
       } catch (e) {
-        resolve({ error: 'failed to parse devices', raw: out })
+        finish({ error: 'failed to parse devices', raw: out })
       }
     })
   })
@@ -1484,7 +1524,12 @@ ipcMain.handle('generate-followup-email', async (_evt, payload: { summary?: stri
   const temperature = typeof payload.temperature === 'number' ? payload.temperature : undefined
   const maxTokens = typeof payload.maxTokens === 'number' ? payload.maxTokens : undefined
 
-  const modelPath = await ensureSummaryModel()
+  let modelPath: string | null = null
+  try {
+    modelPath = await ensureSummaryModel()
+  } catch (e) {
+    return { ok: false, error: e instanceof Error ? e.message : 'failed to prepare summary model' }
+  }
   if (!modelPath) return { ok: false, error: 'summary model not found' }
   startSummarizerIfNeeded(modelPath)
   if (!summarizerProcess) return { ok: false, error: 'summarizer not running' }
@@ -1548,12 +1593,23 @@ function createWindow() {
     icon: path.join(process.env.VITE_PUBLIC!, 'electron-vite.svg'),
     webPreferences: {
       preload: path.join(__dirname, 'preload.mjs'),
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true,
+      webSecurity: true,
+      devTools: !app.isPackaged,
     },
   })
+  win.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))
+  win.webContents.on('will-navigate', (event, targetUrl) => {
+    const currentUrl = win?.webContents.getURL()
+    if (!currentUrl) return
+    if (targetUrl !== currentUrl) {
+      event.preventDefault()
+    }
+  })
 
-  // Test active push message to Renderer-process.
   win.webContents.on('did-finish-load', () => {
-    win?.webContents.send('main-process-message', new Date().toLocaleString())
     void startBackend()
   })
 
@@ -1566,6 +1622,11 @@ function createWindow() {
 }
 
 app.whenReady().then(() => {
+  app.on('web-contents-created', (_event, contents) => {
+    contents.on('will-attach-webview', (event) => {
+      event.preventDefault()
+    })
+  })
   createWindow()
 })
 

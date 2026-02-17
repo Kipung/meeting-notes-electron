@@ -41,3 +41,6 @@ dist-electron/
 
 __pycache__/
 *.pyc
+
+# Local Codex/session handoff notes
+CONTEXT.md

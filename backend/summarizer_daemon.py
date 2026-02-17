@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import json
 try:
     from .summarize_llm import ACTION_ITEMS_MARKER, SENTENCE_SPLIT_RE
@@ -478,7 +480,11 @@ def repl_loop(daemon: SummarizerDaemon):
             else:
                 daemon.send({"event": "error", "msg": "missing file/text in summarize command"})
                 continue
-            chunk_words = int(obj.get("chunk_words", 800))
+            raw_chunk_words = obj.get("chunk_words", 800)
+            try:
+                chunk_words = int(raw_chunk_words)
+            except Exception:
+                chunk_words = 800
             daemon.summarize(text or "", obj.get("out"), chunk_words, obj.get("context"))
         elif cmd == "followup_email":
             summary = obj.get("summary") or obj.get("text")
