@@ -1,5 +1,4 @@
 import os
-import re
 import sys
 
 try:
@@ -7,6 +6,11 @@ try:
 except Exception as e:
     print(f"Failed to import llama_cpp: {e}", file=sys.stderr)
     sys.exit(1)
+
+try:
+    from .summary_formatting import count_summary_sentences, finalize_summary_output
+except ImportError:
+    from summary_formatting import count_summary_sentences, finalize_summary_output
 
 
 def count_words(text: str) -> int:
@@ -22,21 +26,26 @@ def min_words_from_env(default: int) -> int:
 
 DEFAULT_PROMPT = (
     "You are an assistant that summarizes meeting transcripts.\n"
-    "Produce a concise summary in 5-7 sentences, grounding every sentence in the transcript text.\n"
-    "For summary, keep it as a tidy paragraph with normal punctuation and no awkward line breaks.\n"
-    "After the summary, include an 'Action Items:' section only when the transcript clearly supports them.\n"
-    "Limit the section to at most five tasks, each introduced with a bullet point that starts with '-' and stays on its own line.\n"
-    "Only report a task if it is directly supported by something that happened in the transcript or summary; if no real follow-up is required, write 'Action Items: none.'\n"
-    "When you do list actions, mention the topic or person from the transcript that justifies that task so it is clearly traceable.\n"
+    "Return only these sections in this exact order with the same headings:\n"
+    "Summary:\n"
+    "Action Items:\n"
+    "In 'Summary', write 2-4 concise sentences (max 120 words), grounded only in the transcript.\n"
+    "Make sure the summary explicitly includes any high-importance decisions, risks, blockers, or deadlines when they appear.\n"
+    "For student success coaching sessions, highlight the student's current goal/progress, primary barriers, and agreed support plan when present.\n"
+    "Stay focused on the meeting content and do not add unrelated information.\n"
+    "In 'Action Items', include up to five bullets only for explicit follow-up tasks supported by the transcript.\n"
+    "Prioritize concrete student-success follow-ups (assignments, outreach, tutoring, scheduling, resource referrals).\n"
+    "Each action bullet should include owner/topic and due date or timing when available.\n"
+    "If no actionable follow-up is clearly supported, write 'Action Items: none.'\n"
+    "Do not invent details and do not add extra sections.\n"
 )
 SUMMARY_EXPANSION_SUFFIX = (
-    "\nIf the paragraph still has fewer than five sentences, rewrite it so the summary paragraph contains 5-7 sentences, "
-    "adding more detail from the transcript while keeping the Action Items section as instructed."
+    "\nIf the Summary section has fewer than two sentences, rewrite the full response so Summary has 2-4 sentences "
+    "while keeping Action Items rules unchanged."
 )
 EXPANDED_SUMMARY_PROMPT = DEFAULT_PROMPT + SUMMARY_EXPANSION_SUFFIX
-MIN_SUMMARY_SENTENCES = 5
-ACTION_ITEMS_MARKER = "Action Items:"
-SENTENCE_SPLIT_RE = re.compile(r"[^.!?]+[.!?]*")
+MIN_SUMMARY_SENTENCES = 2
+SHORT_TRANSCRIPT_SUMMARY = "Summary:\nNot enough content to summarize.\n\nAction Items: none."
 
 
 def summarize_with_llm(client: Llama, text: str, prompt: str, max_tokens: int = 256) -> str:
@@ -48,19 +57,6 @@ def summarize_with_llm(client: Llama, text: str, prompt: str, max_tokens: int = 
     else:
         resp = client(full_prompt, max_tokens=max_tokens, temperature=0.2)
     return resp.get("choices", [{}])[0].get("text", "").strip()
-
-
-def extract_summary_body(text: str) -> str:
-    idx = text.find(ACTION_ITEMS_MARKER)
-    return text[:idx] if idx != -1 else text
-
-
-def count_summary_sentences(text: str) -> int:
-    body = extract_summary_body(text).strip()
-    if not body:
-        return 0
-    matches = SENTENCE_SPLIT_RE.findall(body)
-    return sum(1 for match in matches if match.strip())
 
 
 def ensure_min_sentences(summary: str, transcript: str, client: Llama) -> str:
@@ -115,7 +111,7 @@ def main():
     default_min_words = 20
     min_words = min_words_from_env(default_min_words)
     if count_words(text) < min_words:
-        summary = "Not enough content to summarize.\nAction Items: none."
+        summary = SHORT_TRANSCRIPT_SUMMARY
         output_path = os.getenv("SUM_SUMMARY_OUT")
         if output_path:
             os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
@@ -135,6 +131,7 @@ def main():
 
     client, summary = summarize_direct(model_path, text, n_ctx=n_ctx)
     summary = ensure_min_sentences(summary, text, client)
+    summary = finalize_summary_output(summary, text)
 
     output_path = os.getenv("SUM_SUMMARY_OUT")
     if output_path:

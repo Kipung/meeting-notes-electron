@@ -1,16 +1,17 @@
 from __future__ import annotations
 
 import json
-try:
-    from .summarize_llm import ACTION_ITEMS_MARKER, SENTENCE_SPLIT_RE
-except ImportError:
-    from summarize_llm import ACTION_ITEMS_MARKER, SENTENCE_SPLIT_RE
 import os
 import re
 import sys
 import threading
 import time
-from typing import Callable, Optional, List
+from typing import Callable, List, Optional
+
+try:
+    from .summary_formatting import finalize_summary_output, split_sentences
+except ImportError:
+    from summary_formatting import finalize_summary_output, split_sentences
 
 try:
     from llama_cpp import Llama
@@ -57,59 +58,56 @@ def max_tokens_from_env(default: int) -> int:
 
 DEFAULT_PROMPT = (
     "You are an assistant that summarizes meeting transcripts.\n"
-    "Produce a concise, on-topic summary in 5-7 sentences, grounding every sentence in the transcript text.\n"
-    "The summary should be a clean paragraph without weird punctuation or line breaks.\n"
+    "Return only these sections in this exact order with the same headings:\n"
+    "Summary:\n"
+    "Action Items:\n"
+    "In 'Summary', write 3-4 concise sentences (max 140 words), grounded only in the transcript.\n"
+    "Make sure the summary explicitly includes any high-importance decisions, risks, blockers, or deadlines when they appear.\n"
+    "For student success coaching sessions, highlight the student's current goal/progress, primary barriers, and agreed support plan when present.\n"
     "Stay focused on the meeting content and do not add unrelated information.\n"
-    "If metadata such as Modality, Subject, Student ID, Student Name, or Coach is provided (prefixed in the input), include it clearly in the summary.\n"
-    "After the summary, include an 'Action Items:' section.\n"
-    "If the transcript clearly supports action items, list up to five tasks, each on its own line starting with a hyphen '-'.\n"
-    "If no actionable items are present, write 'Action Items: none.'\n"
-    "When listing actions, mention the topic or person from the transcript that justifies the task for clear traceability.\n"
+    "If metadata such as Modality, Subject, Student ID, Student Name, or Coach is provided at the top of the input, include relevant details briefly in the summary.\n"
+    "In 'Action Items', include up to five bullets only for explicit follow-up tasks supported by the transcript.\n"
+    "Prioritize concrete student-success follow-ups (assignments, outreach, tutoring, scheduling, resource referrals).\n"
+    "Each action bullet should include owner/topic and due date or timing when available.\n"
+    "If no actionable follow-up is clearly supported, write 'Action Items: none.'\n"
+    "Do not invent details and do not add extra sections.\n"
 )
-SUMMARY_EXPANSION_SUFFIX = (
-    "\nIf the paragraph still has fewer than five sentences, rewrite it so the summary paragraph contains 5-7 sentences, "
-    "adding more detail from the transcript while keeping the Action Items section as instructed."
-)
-EXPANDED_SUMMARY_PROMPT = DEFAULT_PROMPT + SUMMARY_EXPANSION_SUFFIX
 DEFAULT_CHUNK_WORDS = int(os.getenv("SUM_CHUNK_WORDS", "200"))
-MIN_SUMMARY_SENTENCES = 5  # Minimum number of sentences for the summary paragraph
 CHUNK_SUMMARY_PROMPT = (
     "You are an assistant that summarizes meeting transcripts.\n"
-    "Produce a concise 3-5 sentence summary focused only on the provided text.\n"
+    "Produce a concise 2-3 sentence summary focused only on the provided text.\n"
     "Ground every sentence in the transcript and keep the paragraph tidy and self-contained.\n"
     "Do not include an 'Action Items:' section in this response; only provide the summary paragraph.\n"
 )
-
-ACTION_TRIGGERS = [
-    "should",
-    "needs to",
-    "need to",
-    "must",
-    "have to",
-    "should've",
-    "will",
-    "schedule",
-    "plan to",
-    "plan on",
-    "follow up",
-    "next step",
-    "next steps",
-    "action item",
-    "action items",
-    "task",
-    "assign",
-    "review",
-    "look into",
-    "investigate",
-    "prepare",
-    "deliver",
-    "present",
-    "confirm",
-    "document",
-    "research",
-    "develop",
-    "build",
-]
+SHORT_TRANSCRIPT_SUMMARY = (
+    "Summary:\n"
+    "Not enough content to summarize.\n\n"
+    "Action Items: none."
+)
+CONTEXT_OVERFLOW_PATTERNS = (
+    "exceed context window",
+    "requested tokens",
+    "context window",
+)
+FINAL_AGGREGATE_MAX_WORDS = int(os.getenv("SUM_FINAL_AGG_MAX_WORDS", "900"))
+FINAL_AGGREGATE_PER_CHUNK_MAX_WORDS = int(os.getenv("SUM_FINAL_CHUNK_MAX_WORDS", "60"))
+FINAL_IMPORTANCE_HINTS = (
+    "critical",
+    "urgent",
+    "risk",
+    "blocker",
+    "blocked",
+    "deadline",
+    "due",
+    "escalat",
+    "at risk",
+    "probation",
+    "ineligible",
+    "failing",
+    "fail",
+    "compliance",
+    "incident",
+)
 
 def split_into_chunks(text: str, max_words: int) -> List[str]:
     """Split *text* into a list of strings each containing up to *max_words* words.
@@ -143,62 +141,108 @@ def clean_followup_email(text: str) -> str:
     return cleaned
 
 
-def extract_summary_body(text: str) -> str:
-    idx = text.find(ACTION_ITEMS_MARKER)
-    return text[:idx] if idx != -1 else text
+def is_context_overflow_error(exc: Exception) -> bool:
+    msg = str(exc).lower()
+    return any(pattern in msg for pattern in CONTEXT_OVERFLOW_PATTERNS)
 
 
-def count_summary_sentences(text: str) -> int:
-    body = extract_summary_body(text).strip()
-    if not body:
-        return 0
-    matches = SENTENCE_SPLIT_RE.findall(body)
-    return sum(1 for match in matches if match.strip())
+def normalize_chunk_summary(text: str, max_sentences: int = 3, max_words: int = 90) -> str:
+    raw = (text or "").strip()
+    if not raw:
+        return ""
+    lowered = raw.lower()
+    if lowered.startswith("summary:"):
+        raw = raw[len("summary:") :].strip()
+    for marker in ("Action Items:", "High Importance:"):
+        idx = raw.find(marker)
+        if idx != -1:
+            raw = raw[:idx].strip()
+    sentences = [s.strip() for s in split_sentences(raw) if s.strip()]
+    if not sentences:
+        return ""
+    trimmed = sentences[:max_sentences]
+    normalized: List[str] = []
+    for sentence in trimmed:
+        if sentence[-1] not in ".!?":
+            sentence = f"{sentence}."
+        normalized.append(sentence)
+    summary = " ".join(normalized).strip()
+    words = summary.split()
+    if len(words) > max_words:
+        summary = " ".join(words[:max_words]).rstrip(" ,;:") + "..."
+    return summary
 
 
-def contains_actionable_language(text: str) -> bool:
+def trim_words(text: str, max_words: int) -> str:
+    words = text.split()
+    if len(words) <= max_words:
+        return text.strip()
+    return " ".join(words[:max_words]).rstrip(" ,;:") + "..."
+
+
+def contains_high_importance_signal(text: str) -> bool:
     lowered = text.lower()
-    return any(trigger in lowered for trigger in ACTION_TRIGGERS)
+    return any(token in lowered for token in FINAL_IMPORTANCE_HINTS)
 
 
-def parse_action_bullets(action_text: str) -> List[str]:
-    if not action_text:
+def compress_chunk_summaries_for_final(
+    chunk_summaries: List[str],
+    max_total_words: int = FINAL_AGGREGATE_MAX_WORDS,
+    per_chunk_max_words: int = FINAL_AGGREGATE_PER_CHUNK_MAX_WORDS,
+) -> List[str]:
+    if not chunk_summaries:
         return []
-    bullets: List[str] = []
-    for line in action_text.splitlines():
-        stripped = line.strip()
-        if not stripped:
-            continue
-        if stripped.startswith("-"):
-            bullets.append(stripped)
-            continue
-        if stripped.lower().startswith("none"):
-            continue
-        bullets.append(f"- {stripped}")
-    return bullets
+    normalized: List[str] = []
+    for raw in chunk_summaries:
+        compact = normalize_chunk_summary(raw, max_sentences=2, max_words=per_chunk_max_words)
+        if compact:
+            normalized.append(compact)
+    if not normalized:
+        return []
+    if max_total_words <= 0:
+        return normalized
+    if sum(count_words(item) for item in normalized) <= max_total_words:
+        return normalized
 
+    selected_indexes: List[int] = []
+    seen = set()
+    words_used = 0
 
-def finalize_action_items(summary: str, transcript: str) -> str:
-    idx = summary.find(ACTION_ITEMS_MARKER)
-    if idx == -1:
-        body = summary.rstrip()
-        action_text = ""
-    else:
-        body = summary[:idx].rstrip()
-        action_text = summary[idx + len(ACTION_ITEMS_MARKER):].strip()
-    bullets = parse_action_bullets(action_text)
-    actionable = (
-        contains_actionable_language(transcript)
-        or contains_actionable_language(body)
-        or contains_actionable_language(action_text)
-    )
-    if bullets and actionable:
-        action_section = f"{ACTION_ITEMS_MARKER}\n" + "\n".join(bullets)
-    else:
-        action_section = f"{ACTION_ITEMS_MARKER} none."
-    if body:
-        return f"{body}\n\n{action_section}"
-    return action_section
+    def try_add(idx: int):
+        nonlocal words_used
+        if idx < 0 or idx >= len(normalized) or idx in seen:
+            return
+        candidate = normalized[idx]
+        candidate_words = count_words(candidate)
+        if candidate_words <= 0:
+            return
+        if not selected_indexes:
+            if candidate_words > max_total_words:
+                candidate = trim_words(candidate, max_total_words)
+                candidate_words = count_words(candidate)
+                normalized[idx] = candidate
+            selected_indexes.append(idx)
+            seen.add(idx)
+            words_used += candidate_words
+            return
+        if words_used + candidate_words > max_total_words:
+            return
+        selected_indexes.append(idx)
+        seen.add(idx)
+        words_used += candidate_words
+
+    for idx, summary in enumerate(normalized):
+        if contains_high_importance_signal(summary):
+            try_add(idx)
+    try_add(0)
+    try_add(len(normalized) - 1)
+    for idx in range(len(normalized)):
+        try_add(idx)
+
+    if not selected_indexes:
+        return [trim_words(normalized[0], max_total_words)]
+    selected_indexes.sort()
+    return [normalized[idx] for idx in selected_indexes]
 
 
 def summarize_with_llm(
@@ -209,49 +253,73 @@ def summarize_with_llm(
     on_delta: Optional[Callable[[str], None]] = None,
 ) -> str:
     full_prompt = prompt + "\n\nTranscript:\n" + text + "\n\nSummary:\n"
+
+    def run_completion(current_max_tokens: int, stream: bool):
+        if hasattr(client, "create_completion"):
+            return client.create_completion(
+                prompt=full_prompt,
+                max_tokens=current_max_tokens,
+                temperature=0.2,
+                stream=stream,
+            )
+        if hasattr(client, "create"):
+            return client.create(
+                prompt=full_prompt,
+                max_tokens=current_max_tokens,
+                temperature=0.2,
+                stream=stream,
+            )
+        return client(
+            full_prompt,
+            max_tokens=current_max_tokens,
+            temperature=0.2,
+            stream=stream,
+        )
+
+    current_max_tokens = max_tokens
     if on_delta:
-        try:
-            if hasattr(client, "create_completion"):
-                resp = client.create_completion(prompt=full_prompt, max_tokens=max_tokens, temperature=0.2, stream=True)
-            elif hasattr(client, "create"):
-                resp = client.create(prompt=full_prompt, max_tokens=max_tokens, temperature=0.2, stream=True)
-            else:
-                resp = client(full_prompt, max_tokens=max_tokens, temperature=0.2, stream=True)
-            collected = ""
-            for chunk in resp:
-                chunk_text = chunk.get("choices", [{}])[0].get("text", "")
-                if not chunk_text:
-                    continue
-                if not collected:
-                    collected = chunk_text
-                    on_delta(chunk_text)
-                    continue
-                if chunk_text.startswith(collected):
-                    delta = chunk_text[len(collected) :]
-                    collected = chunk_text
-                elif chunk_text in collected:
-                    delta = ""
-                else:
-                    max_overlap = 0
-                    max_len = min(len(collected), len(chunk_text))
-                    for i in range(1, max_len + 1):
-                        if collected[-i:] == chunk_text[:i]:
-                            max_overlap = i
-                    delta = chunk_text[max_overlap:]
+        for _ in range(3):
+            try:
+                resp = run_completion(current_max_tokens, stream=True)
+                collected = ""
+                for chunk in resp:
+                    chunk_text = chunk.get("choices", [{}])[0].get("text", "")
+                    if not chunk_text:
+                        continue
+                    if not collected:
+                        collected = chunk_text
+                        on_delta(chunk_text)
+                        continue
+                    if chunk_text.startswith(collected):
+                        delta = chunk_text[len(collected) :]
+                        collected = chunk_text
+                    elif chunk_text in collected:
+                        delta = ""
+                    else:
+                        max_overlap = 0
+                        max_len = min(len(collected), len(chunk_text))
+                        for i in range(1, max_len + 1):
+                            if collected[-i:] == chunk_text[:i]:
+                                max_overlap = i
+                        delta = chunk_text[max_overlap:]
+                        if delta:
+                            collected += delta
                     if delta:
-                        collected += delta
-                if delta:
-                    on_delta(delta)
-            return collected.strip()
-        except Exception:
-            pass
-    if hasattr(client, "create_completion"):
-        resp = client.create_completion(prompt=full_prompt, max_tokens=max_tokens, temperature=0.2)
-    elif hasattr(client, "create"):
-        resp = client.create(prompt=full_prompt, max_tokens=max_tokens, temperature=0.2)
-    else:
-        resp = client(full_prompt, max_tokens=max_tokens, temperature=0.2)
-    return resp.get("choices", [{}])[0].get("text", "").strip()
+                        on_delta(delta)
+                return collected.strip()
+            except Exception as e:
+                if not is_context_overflow_error(e) or current_max_tokens <= 128:
+                    break
+                current_max_tokens = max(128, current_max_tokens // 2)
+    for _ in range(3):
+        try:
+            resp = run_completion(current_max_tokens, stream=False)
+            return resp.get("choices", [{}])[0].get("text", "").strip()
+        except Exception as e:
+            if not is_context_overflow_error(e) or current_max_tokens <= 128:
+                raise
+            current_max_tokens = max(128, current_max_tokens // 2)
+    return ""
 
 
 def generate_followup_email(
@@ -278,8 +346,6 @@ def generate_followup_email(
     return clean_followup_email(email)
 
 
-# finalize_summary function removed – post‑processing disabled
-
 def summarize_direct(
     client: Llama,
     text: str,
@@ -288,8 +354,7 @@ def summarize_direct(
 ) -> str:
     if on_progress:
         on_progress("summarizing transcript")
-    # Use a larger token budget to avoid truncation and preserve punctuation
-    return summarize_with_llm(client, text, DEFAULT_PROMPT, max_tokens=1024, on_delta=on_stream)
+    return summarize_with_llm(client, text, DEFAULT_PROMPT, max_tokens=640, on_delta=on_stream)
 
 
 def create_llama(model_path: str, n_ctx: int) -> Llama:
@@ -356,7 +421,7 @@ class SummarizerDaemon:
             if word_count < self.min_words:
                 msg = f"transcript too short ({word_count} words); skipping summary"
                 self.send({"event": "progress", "msg": msg, "context": context})
-                summary = "Not enough content to summarize.\nAction Items: none."
+                summary = SHORT_TRANSCRIPT_SUMMARY
                 if out_path:
                     try:
                         os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
@@ -371,31 +436,68 @@ class SummarizerDaemon:
             chunk_threshold = chunk_words if isinstance(chunk_words, int) and chunk_words > 0 else DEFAULT_CHUNK_WORDS
             context_type = context.get("type") if context else None
             is_chunk_request = context_type == "chunk"
+            if is_chunk_request:
+                try:
+                    chunk_summary = summarize_with_llm(
+                        self.client,
+                        combined_text,
+                        CHUNK_SUMMARY_PROMPT,
+                        max_tokens=256,
+                    )
+                except Exception as e:
+                    self.send({"event": "error", "msg": f"summarization error: {e}", "out": out_path, "context": context})
+                    return
+                summary = normalize_chunk_summary(chunk_summary)
+                if not summary:
+                    summary = "Not enough content to summarize."
+                dur = time.time() - start
+                if out_path:
+                    try:
+                        os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
+                        with open(out_path, "w", encoding="utf-8") as f:
+                            f.write(summary)
+                    except Exception as e:
+                        self.send({"event": "error", "msg": f"failed to write summary: {e}", "out": out_path, "context": context})
+                        return
+                self.send({"event": "done", "out": out_path, "text": summary, "secs": dur, "context": context})
+                return
             final_input_text = combined_text
-            if not is_chunk_request:
-                chunks = [chunk.strip() for chunk in split_into_chunks(text, chunk_threshold) if chunk.strip()]
-                if len(chunks) > 1:
-                    chunk_summaries = []
-                    for idx, chunk_text in enumerate(chunks, start=1):
-                        self.send({"event": "progress", "msg": f"summarizing chunk {idx}/{len(chunks)}", "context": context})
-                        try:
-                            chunk_summary = summarize_with_llm(
-                                self.client,
-                                chunk_text,
-                                CHUNK_SUMMARY_PROMPT,
-                                max_tokens=512,
-                            )
-                        except Exception as e:
-                            self.send({"event": "progress", "msg": f"chunk {idx} summary failed: {e}", "context": context})
-                            continue
-                        if chunk_summary:
-                            chunk_summaries.append(chunk_summary.strip())
-                    if chunk_summaries:
-                        aggregated = "\n\n".join(
-                            f"Chunk {i + 1} summary:\n{chunk_summary}"
-                            for i, chunk_summary in enumerate(chunk_summaries)
+            chunks = [chunk.strip() for chunk in split_into_chunks(text, chunk_threshold) if chunk.strip()]
+            if len(chunks) > 1:
+                chunk_summaries = []
+                for idx, chunk_text in enumerate(chunks, start=1):
+                    self.send({"event": "progress", "msg": f"summarizing chunk {idx}/{len(chunks)}", "context": context})
+                    try:
+                        chunk_summary = summarize_with_llm(
+                            self.client,
+                            chunk_text,
+                            CHUNK_SUMMARY_PROMPT,
+                            max_tokens=256,
                         )
-                        final_input_text = meta_prefix + aggregated
+                    except Exception as e:
+                        self.send({"event": "progress", "msg": f"chunk {idx} summary failed: {e}", "context": context})
+                        continue
+                    compact = normalize_chunk_summary(chunk_summary)
+                    if compact:
+                        chunk_summaries.append(compact)
+                if chunk_summaries:
+                    reduced_chunk_summaries = compress_chunk_summaries_for_final(chunk_summaries)
+                    if len(reduced_chunk_summaries) < len(chunk_summaries):
+                        self.send(
+                            {
+                                "event": "progress",
+                                "msg": (
+                                    "compressing aggregated chunk summaries "
+                                    f"({len(chunk_summaries)} -> {len(reduced_chunk_summaries)})"
+                                ),
+                                "context": context,
+                            }
+                        )
+                    aggregated = "\n\n".join(
+                        f"Chunk {i + 1} summary:\n{chunk_summary}"
+                        for i, chunk_summary in enumerate(reduced_chunk_summaries)
+                    )
+                    final_input_text = meta_prefix + aggregated
             try:
                 summary = summarize_direct(
                     self.client,
@@ -406,12 +508,7 @@ class SummarizerDaemon:
             except Exception as e:
                 self.send({"event": "error", "msg": f"summarization error: {e}", "out": out_path, "context": context})
                 return
-            # After we have the raw summary (from chunk merge or single call), prepend any metadata so it always appears
-            if meta_prefix and not summary.startswith(meta_prefix):
-                summary = meta_prefix + summary
-            # If the initial summary is too short, try a longer generation and re‑apply post‑processing
-            # If the initial summary is too short, try a longer generation and keep the raw result
-            summary = finalize_action_items(summary, text)
+            summary = finalize_summary_output(summary, text)
 
             dur = time.time() - start
             if out_path:

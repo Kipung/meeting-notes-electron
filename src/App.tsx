@@ -1,8 +1,8 @@
-import { useEffect, useRef, useState, type DragEvent } from 'react'
+import { useEffect, useMemo, useRef, useState, type DragEvent } from 'react'
 import './App.css'
 
-const MODEL_CHOICES = ['tiny.en', 'small.en', 'base.en', 'medium.en']
 const DEFAULT_WHISPER_MODEL = 'medium.en'
+const SUMMARY_META_PLACEHOLDER = '(not provided)'
 type StepState = 'idle' | 'running' | 'paused' | 'done' | 'error'
 type DroppedFile = File & { path?: string }
 const backend = window.backend
@@ -20,13 +20,105 @@ const STEP_LABELS: Record<StepState, string> = {
   done: 'done',
   error: 'error',
 }
+const SECTION_HEADING_RE = /^\s*(summary|action items|high importance)\s*:\s*(.*)$/i
+const LEADING_BULLET_RE = /^\s*(?:[-*•]|\d+[.)])\s*/
+const ACTION_NONE_RE = /^(?:none|none\.|no action items?\.?|no actionable follow-?up(?: tasks?)?\.?)$/i
 
-const getTodayDateString = () => {
-  const now = new Date()
-  const year = now.getFullYear()
-  const month = String(now.getMonth() + 1).padStart(2, '0')
-  const day = String(now.getDate()).padStart(2, '0')
-  return `${year}-${month}-${day}`
+type ParsedSummaryView = {
+  summaryText: string
+  actionItems: string[]
+  actionItemsNone: boolean
+  hasActionSection: boolean
+}
+type SummaryMetaField = {
+  label: string
+  value: string
+  missing: boolean
+}
+
+const cleanLine = (value: string) => value.trim().replace(/\s+/g, ' ')
+
+const normalizeBulletText = (value: string) => cleanLine(value.replace(LEADING_BULLET_RE, '')).replace(/[;]+$/, '')
+
+const parseActionItems = (lines: string[]) => {
+  const items: string[] = []
+  let sawNone = false
+  for (const line of lines) {
+    const cleaned = cleanLine(line)
+    if (!cleaned) continue
+    const segments = cleaned.split(/\s*;\s+/)
+    for (const segment of segments) {
+      const item = normalizeBulletText(segment)
+      if (!item) continue
+      if (ACTION_NONE_RE.test(item)) {
+        sawNone = true
+        continue
+      }
+      items.push(item)
+    }
+  }
+  const seen = new Set<string>()
+  const unique = items.filter((item) => {
+    const key = item.toLowerCase()
+    if (seen.has(key)) return false
+    seen.add(key)
+    return true
+  })
+  return { items: unique, sawNone }
+}
+
+const parseSummaryForView = (rawSummary: string): ParsedSummaryView => {
+  const lines = rawSummary.replace(/\r\n/g, '\n').split('\n')
+  const summaryLines: string[] = []
+  const actionLines: string[] = []
+  let currentSection: 'summary' | 'action' | 'other' = 'other'
+  let sawSummaryHeading = false
+  let sawActionHeading = false
+
+  for (const line of lines) {
+    const match = line.match(SECTION_HEADING_RE)
+    if (match) {
+      const section = match[1].toLowerCase()
+      const remainder = cleanLine(match[2] || '')
+      if (section === 'summary') {
+        currentSection = 'summary'
+        sawSummaryHeading = true
+        if (remainder) summaryLines.push(remainder)
+        continue
+      }
+      if (section === 'action items') {
+        currentSection = 'action'
+        sawActionHeading = true
+        if (remainder) actionLines.push(remainder)
+        continue
+      }
+      if (section === 'high importance') {
+        currentSection = 'summary'
+        if (remainder) summaryLines.push(remainder)
+        continue
+      }
+    }
+
+    const cleaned = line.trim()
+    if (!cleaned) continue
+    if (currentSection === 'action') {
+      actionLines.push(cleaned)
+    } else if (currentSection === 'summary') {
+      summaryLines.push(cleaned)
+    } else if (!sawSummaryHeading && !sawActionHeading) {
+      summaryLines.push(cleaned)
+    }
+  }
+
+  const summaryText = summaryLines.map(normalizeBulletText).filter(Boolean).join(' ')
+
+  const { items: actionItems, sawNone: actionItemsNone } = parseActionItems(actionLines)
+  return {
+    summaryText,
+    actionItems,
+    actionItemsNone,
+    hasActionSection: sawActionHeading || actionLines.length > 0,
+  }
 }
 
 function App() {
@@ -34,7 +126,6 @@ function App() {
   const [loopbackDevices, setLoopbackDevices] = useState<BackendDevice[]>([])
   const [selectedDevice, setSelectedDevice] = useState<number | null>(null)
   const [selectedLoopback, setSelectedLoopback] = useState<number | null>(null)
-  const [model, setModel] = useState<string>(DEFAULT_WHISPER_MODEL)
   const [running, setRunning] = useState(false)
   const [status, setStatus] = useState('idle')
   const [statusDetail, setStatusDetail] = useState('')
@@ -54,7 +145,6 @@ function App() {
   const [summary, setSummary] = useState('')
   const [sessionDir, setSessionDir] = useState<string | null>(null)
   const [sessionsRoot, setSessionsRoot] = useState<string | null>(null)
-  const [sessionDate, setSessionDate] = useState(() => getTodayDateString())
   const [sessionModality, setSessionModality] = useState('Email')
   const [sessionSubject, setSessionSubject] = useState('')
   const [coachInitials, setCoachInitials] = useState('')
@@ -242,7 +332,6 @@ function App() {
     setFollowUpEmail('')
     setFollowUpStatus('')
     setFollowUpGenerating(false)
-    setSessionDate(getTodayDateString())
     setStatus('recording')
     setStatusDetail('recording audio')
     setRecordingState('running')
@@ -258,7 +347,7 @@ function App() {
     backend.start({
       deviceIndex: selectedDevice ?? undefined,
       loopbackDeviceIndex: selectedLoopback ?? undefined,
-      model,
+      model: DEFAULT_WHISPER_MODEL,
     })
   }
 
@@ -432,31 +521,40 @@ function App() {
   const canImportFiles = !running && !importBusy
   const canDeleteAudio = Boolean(sessionDir) && transcriptionState === 'done' && recordingState !== 'running' && recordingState !== 'paused'
   const followUpActionLabel = followUpGenerating ? 'Generating...' : followUpEmail ? 'Regenerate from summary' : 'Generate from summary'
-  const studentInfo = [studentId ? `Student ID: ${studentId}` : '', studentName ? `Student Name: ${studentName}` : '']
-    .filter(Boolean)
-    .join('\n')
-  const sessionDetailsLine = summary
-    ? (() => {
-        const baseParts = [
-          sessionDate || '',
-          sessionModality || '',
-          sessionSubject ? `re: ${sessionSubject}` : '',
-        ].filter(Boolean)
-        let line = baseParts.join(' ')
-        if (coachInitials) {
-          line = line ? `${line} - ${coachInitials}` : coachInitials
+  const parsedSummary = useMemo(() => parseSummaryForView(summary), [summary])
+  const summaryMetaFields = useMemo<SummaryMetaField[]>(
+    () => {
+      const fields: Array<{ label: string; rawValue: string }> = [
+        { label: 'Modality', rawValue: sessionModality },
+        { label: 'Subject', rawValue: sessionSubject },
+        { label: 'Student ID', rawValue: studentId },
+        { label: 'Student Name', rawValue: studentName },
+        { label: 'Coach', rawValue: coachInitials },
+      ]
+      return fields.map((field) => {
+        const value = cleanLine(field.rawValue)
+        return {
+          label: field.label,
+          value,
+          missing: !value,
         }
-        return line
-      })()
-    : ''
+      })
+    },
+    [sessionModality, sessionSubject, studentId, studentName, coachInitials]
+  )
+  const summaryMetaLines = summaryMetaFields.map(
+    (field) => `${field.label}: ${field.missing ? SUMMARY_META_PLACEHOLDER : field.value}`
+  )
   const summaryWithMeta = summary
     ? [
-        studentInfo,
-        sessionDetailsLine,
-        summary,
-      ]
-        .filter(Boolean)
-        .join('\n\n')
+        ...summaryMetaLines,
+        '',
+        'Summary:',
+        parsedSummary.summaryText || 'No summary content found.',
+        '',
+        'Action Items:',
+        parsedSummary.actionItems.length > 0 ? parsedSummary.actionItems.map((item) => `- ${item}`).join('\n') : 'none.',
+      ].join('\n')
     : summary
   const sessionDirLabel = sessionDir ? compactPath(sessionDir, sessionsRoot) : null
   const sessionsRootLabel = sessionsRoot ? compactPath(sessionsRoot) : '(loading...)'
@@ -546,7 +644,7 @@ function App() {
 
   return (
     <div className="app-shell" onDragOver={onDragOverApp} onDragLeave={onDragLeaveApp} onDrop={onDropApp}>
-      <h1 style={{ fontSize: 24, margin: '0 0 10px' }}>Meeting Notes</h1>
+      <h1 style={{ fontSize: 24, margin: '0 0 10px' }}>SSC Meeting Helper</h1>
       {dropActive ? (
         <div style={{ marginBottom: 10, padding: 8, border: '1px dashed #6c6c6c', borderRadius: 6, color: '#d8d8d8' }}>
           Drop an audio file or transcript file to process.
@@ -718,17 +816,6 @@ function App() {
             )
           ) : null}
 
-          <div className="form-inline" style={{ marginBottom: 6 }}>
-            <label>Model: </label>
-            <select className="form-inline__control" value={model} onChange={(e) => setModel(e.target.value)}>
-              {MODEL_CHOICES.map((m) => (
-                <option key={m} value={m}>
-                  {m}
-                </option>
-              ))}
-            </select>
-          </div>
-
           <div className="control-row" style={{ marginBottom: 6 }}>
             <button
               onClick={onPrimaryToggle}
@@ -826,12 +913,39 @@ function App() {
           <button onClick={() => copyToClipboard(summaryWithMeta)} disabled={!summary} style={{ marginBottom: 8 }}>
             Copy summary
           </button>
-          <textarea
-            className="output-panel__textarea"
-            value={summary}
-            onChange={(e) => setSummary(e.target.value)}
-            placeholder="Summary will appear here..."
-          />
+          <div className="summary-display">
+            <div className="summary-display__meta">
+              {summaryMetaFields.map((field) => (
+                <div className="summary-display__meta-row" key={field.label}>
+                  <span className="summary-display__meta-label">{field.label}:</span>
+                  <span className={field.missing ? 'summary-display__meta-value summary-display__meta-value--placeholder' : 'summary-display__meta-value'}>
+                    {field.missing ? SUMMARY_META_PLACEHOLDER : field.value}
+                  </span>
+                </div>
+              ))}
+            </div>
+            <>
+              <div className="summary-display__section-title">Summary</div>
+              <textarea
+                className="output-panel__textarea summary-display__editor"
+                value={summary}
+                onChange={(e) => setSummary(e.target.value)}
+                placeholder="Summary will appear here..."
+              />
+              <div className="summary-display__section-title">Action Items</div>
+              {parsedSummary.actionItems.length > 0 ? (
+                <ul className="summary-display__list summary-display__list--actions">
+                  {parsedSummary.actionItems.map((item, idx) => (
+                    <li key={`action-${idx}`}>{item}</li>
+                  ))}
+                </ul>
+              ) : (
+                <div className="summary-display__empty">
+                  {summary && (parsedSummary.actionItemsNone || parsedSummary.hasActionSection) ? 'No action items.' : 'No action items yet.'}
+                </div>
+              )}
+            </>
+          </div>
         </div>
 
         <div className="output-panel">

@@ -1,0 +1,6 @@
+Coach: We reviewed your attendance and progress in biology.
+Coach: A key decision was made to prioritize attendance recovery before adding extra coursework.
+Coach: Missing two more classes creates a serious risk of failing the course.
+Student: I can attend office hours on Wednesday.
+Coach: You will email your professor tonight and submit the missed lab by Friday.
+Coach: I will follow up next Monday and coordinate tutoring if needed.

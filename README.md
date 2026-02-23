@@ -1,4 +1,4 @@
-# Meeting Notes Electron
+# SSC Meeting Helper
 
 Record meetings, transcribe with Whisper, and summarize with a local GGUF/GGML Llama model. Sessions are stored on disk with audio, transcript, and summary files.
 
