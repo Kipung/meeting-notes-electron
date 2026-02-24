@@ -10,7 +10,7 @@ import numpy as np
 from faster_whisper import WhisperModel
 
 
-DEFAULT_WHISPER_MODEL = "small.en"
+DEFAULT_WHISPER_MODEL = "medium.en"
 DEFAULT_LLAMA_MODEL = "Llama-3.2-1B-Instruct-Q6_K.gguf"
 DEFAULT_LLAMA_URL = (
     "https://huggingface.co/bartowski/Llama-3.2-1B-Instruct-GGUF/resolve/main/"
@@ -135,12 +135,12 @@ def main():
     models_dir.mkdir(parents=True, exist_ok=True)
     log(f"Preparing models in: {models_dir}")
     ensure_whisper_model(args.whisper_model.strip() or DEFAULT_WHISPER_MODEL, whisper_dir)
-    ensure_vad_model(vad_path)
-    ensure_llama_model(
-        models_dir,
-        args.llama_model_name.strip() or DEFAULT_LLAMA_MODEL,
-        args.llama_url.strip() or DEFAULT_LLAMA_URL,
-    )
+    # ensure_vad_model(vad_path)
+    # ensure_llama_model(
+    #     models_dir,
+    #     args.llama_model_name.strip() or DEFAULT_LLAMA_MODEL,
+    #     args.llama_url.strip() or DEFAULT_LLAMA_URL,
+    # )
     log("All models are ready for packaging.")
 
 

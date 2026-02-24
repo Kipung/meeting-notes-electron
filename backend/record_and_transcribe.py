@@ -242,29 +242,29 @@ def _mix_audio(mic_i16: np.ndarray, loop_i16: np.ndarray) -> np.ndarray:
 
 def _load_whisper_model(model_name: str, download_root: str | None):
     whisper_root = download_root or _default_whisper_root()
-    for device, compute_type in (("cuda", "float16"), ("cpu", "int8")):
-        try:
-            model = WhisperModel(
-                model_name,
-                device=device,
-                compute_type=compute_type,
-                download_root=whisper_root,
-                local_files_only=True,
-            )
-            # Force backend runtime initialization early so missing CUDA DLLs
-            # are detected here instead of in the transcription worker thread.
-            warmup_audio = np.zeros(TARGET_RATE, dtype=np.float32)
-            warmup_segments, _ = model.transcribe(warmup_audio, language="en", task="transcribe")
-            for _ in warmup_segments:
-                pass
-            return model, device, compute_type
-        except Exception as e:
-            print(
-                f"[transcribe] failed on {device} ({compute_type}), trying fallback: {e}",
-                file=sys.stderr,
-                flush=True,
-            )
-    raise RuntimeError("unable to initialize faster-whisper on both cuda and cpu")
+    device = "cpu"
+    compute_type = "int8"
+    try:
+        model = WhisperModel(
+            model_name,
+            device=device,
+            compute_type=compute_type,
+            download_root=whisper_root,
+            local_files_only=True,
+        )
+        # Force backend runtime initialization early so missing CUDA DLLs
+        # are detected here instead of in the transcription worker thread.
+        warmup_audio = np.zeros(TARGET_RATE, dtype=np.float32)
+        warmup_segments, _ = model.transcribe(warmup_audio, language="en", task="transcribe")
+        for _ in warmup_segments:
+            pass
+        return model, device, compute_type
+    except Exception as e:
+        print(
+            f"[transcribe] failed on {device} ({compute_type}), trying fallback: {e}",
+            file=sys.stderr,
+            flush=True,
+        )
 
 
 def main():
@@ -295,8 +295,6 @@ def main():
         sys.exit(3)
 
     chunk_ms = (TARGET_CHUNK / float(TARGET_RATE)) * 1000.0
-    pre_pad_frames = max(0, int(VAD_PRE_PAD_MS / chunk_ms)) if chunk_ms > 0 else 0
-    post_pad_frames = max(0, int(VAD_POST_PAD_MS / chunk_ms)) if chunk_ms > 0 else 0
     min_silence_frames = max(1, int(VAD_MIN_SILENCE_MS / chunk_ms)) if chunk_ms > 0 else 1
     min_speech_frames = max(1, int(VAD_MIN_SPEECH_MS / chunk_ms)) if chunk_ms > 0 else 1
     min_utterance_samples = int((VAD_MIN_SPEECH_MS / 1000.0) * TARGET_RATE)
@@ -411,7 +409,7 @@ def main():
             state.loopback_rate = loopback_rate
             state.mic_chunk = input_chunk
             state.loopback_chunk = loopback_chunk
-            state.pre_buffer = collections.deque(maxlen=pre_pad_frames or 1)
+            state.pre_buffer = collections.deque()
             if hasattr(vad_model, "reset_states"):
                 vad_model.reset_states()
             current_session["state"] = state
@@ -470,9 +468,10 @@ def main():
         if not frames:
             return
         audio_i16 = np.concatenate(frames)
-        if audio_i16.size < min_utterance_samples:
+        if audio_i16.size == 0:
             return
-        state.utterance_queue.put(audio_i16)
+        if audio_i16.size >= min_utterance_samples:
+            state.utterance_queue.put(audio_i16)
 
     def recording_loop():
         while not shutdown_event.is_set():
@@ -570,11 +569,9 @@ def main():
                     else:
                         state.silence_buffer.append(audio_i16)
                         if len(state.silence_buffer) >= min_silence_frames:
-                            if post_pad_frames > 0:
-                                state.utterance_frames.extend(state.silence_buffer[:post_pad_frames])
+                            state.utterance_frames.extend(state.silence_buffer)
                             finalize_utterance(state, state.utterance_frames)
-                            tail = state.silence_buffer[-pre_pad_frames:] if pre_pad_frames > 0 else []
-                            state.pre_buffer = collections.deque(tail, maxlen=pre_pad_frames or 1)
+                            state.pre_buffer = collections.deque()
                             state.silence_buffer = []
                             state.utterance_frames = []
                             state.speaking = False
@@ -602,8 +599,7 @@ def main():
                 pass
 
             if state.silence_buffer and state.utterance_frames:
-                if post_pad_frames > 0:
-                    state.utterance_frames.extend(state.silence_buffer[:post_pad_frames])
+                state.utterance_frames.extend(state.silence_buffer)
             if state.utterance_frames:
                 finalize_utterance(state, state.utterance_frames)
 
