@@ -1,6 +1,7 @@
 import json
 import os
 import sys
+from pathlib import Path
 
 
 def emit(event: str, message: str, **fields):
@@ -12,10 +13,12 @@ def emit(event: str, message: str, **fields):
 def check_imports():
     emit("status", "checking python dependencies")
     try:
-        import torch 
-        import torchaudio  
-        import whisper  
-        import pyaudio 
+        import faster_whisper  
+        import onnxruntime
+        if sys.platform == "win32":
+            import pyaudiowpatch as pyaudio
+        else:
+            import pyaudio 
         import llama_cpp 
     except Exception as exc:
         emit("error", f"dependency import failed: {exc}")
@@ -23,46 +26,53 @@ def check_imports():
 
 
 def ensure_whisper_model(model_name: str, download_root: str = None):
-    emit("status", f"downloading whisper model {model_name}")
+    emit("status", f"downloading faster-whisper model {model_name}")
     try:
-        import whisper
+        from faster_whisper import WhisperModel
+        import numpy as np
     except Exception as exc:
-        emit("error", f"failed to import whisper: {exc}")
+        emit("error", f"failed to import faster-whisper: {exc}")
         sys.exit(3)
+    emit("status", f"faster-whisper download root: {download_root or 'default cache directory'}")
 
-    model_file = None
-    if download_root:
-        model_file = os.path.join(download_root, f"{model_name}.pt")
-        if os.path.exists(model_file):
-            emit("status", f"whisper model already present: {model_name}")
+    last_error = None
+    for device, compute_type in (("cuda", "float16"), ("cpu", "int8")):
+        try:
+            model = WhisperModel(
+                model_name,
+                device=device,
+                compute_type=compute_type,
+                download_root=download_root,
+            )
+            warmup_segments, _ = model.transcribe(np.zeros(16000, dtype=np.float32), language="en", task="transcribe")
+            for _ in warmup_segments:
+                pass
             return
+        except Exception:
+            last_error = sys.exc_info()[1]
+            continue
 
+    emit("error", f"faster-whisper download/init failed: {last_error}")
+    sys.exit(4)
+
+
+def _default_vad_model_path() -> str:
+    return str(Path(__file__).resolve().parent.parent / "models" / "silero_vad.onnx")
+
+
+def ensure_vad_model(vad_model_path: str):
+    emit("status", f"loading silero VAD model via onnxruntime: {vad_model_path}")
+    if not os.path.exists(vad_model_path):
+        emit("error", f"silero VAD model not found: {vad_model_path}")
+        sys.exit(7)
     try:
-        whisper.load_model(model_name, download_root=download_root)
-    except Exception as exc:
-        emit("error", f"whisper download failed: {exc}")
-        sys.exit(4)
-
-    if model_file and not os.path.exists(model_file):
-        emit("error", f"whisper model not found after download: {model_file}")
-        sys.exit(5)
-
-
-def ensure_vad_model():
-    emit("status", "loading silero VAD model")
-    try:
-        import torch
-    except Exception as exc:
-        emit("error", f"failed to import torch: {exc}")
-        sys.exit(6)
-
-    try:
-        torch.hub.load(
-            repo_or_dir="snakers4/silero-vad",
-            model="silero_vad",
-            trust_repo=True,
-            force_reload=False,
+        import onnxruntime as ort
+        _session = ort.InferenceSession(
+            vad_model_path,
+            providers=["CPUExecutionProvider"],
         )
+        _session.get_inputs()
+        _session.get_outputs()
     except Exception as exc:
         emit("error", f"vad model load failed: {exc}")
         sys.exit(7)
@@ -70,13 +80,14 @@ def ensure_vad_model():
 
 def main():
     whisper_model = os.getenv("WHISPER_MODEL", "small.en")
-    whisper_dir = os.getenv("WHISPER_DIR", "").strip() or None
+    whisper_dir = os.getenv("WHISPER_DIR", "").strip() or str(Path(__file__).resolve().parent.parent / "models" / "whisper")
+    vad_model_path = os.getenv("SILERO_VAD_MODEL", "").strip() or _default_vad_model_path()
     if whisper_dir:
         os.makedirs(whisper_dir, exist_ok=True)
 
     check_imports()
     ensure_whisper_model(whisper_model, whisper_dir)
-    ensure_vad_model()
+    ensure_vad_model(vad_model_path)
     emit("done", "setup complete")
 
 
