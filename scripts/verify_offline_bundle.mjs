@@ -11,6 +11,7 @@ if (process.env.SKIP_BUNDLE_CHECK === '1') {
 
 const expectedVersionRaw = process.env.EXPECTED_PYTHON_VERSION || '3.10,3.11'
 const whisperModel = process.env.WHISPER_MODEL || 'small.en'
+const summaryModelName = process.env.SUMMARY_MODEL_NAME || 'Llama-3.2-1B-Instruct-Q6_K.gguf'
 
 const pythonPath =
   process.platform === 'win32'
@@ -65,16 +66,24 @@ const modelsDir = path.join(root, 'models')
 if (!fs.existsSync(modelsDir)) {
   errors.push(`missing models directory: ${modelsDir}`)
 } else {
-  const ggufs = fs.readdirSync(modelsDir).filter((f) => f.toLowerCase().endsWith('.gguf'))
-  if (ggufs.length === 0) {
-    errors.push(`no .gguf model files found in ${modelsDir}`)
+  const summaryModelPath = path.join(modelsDir, summaryModelName)
+  if (!fs.existsSync(summaryModelPath)) {
+    const ggufs = fs.readdirSync(modelsDir).filter((f) => f.toLowerCase().endsWith('.gguf'))
+    if (ggufs.length === 0) {
+      errors.push(`missing summary model: ${summaryModelPath} (and no .gguf fallback found)`)
+    }
   }
-}
 
-const whisperDir = path.join(root, 'whisper')
-const whisperFile = path.join(whisperDir, `${whisperModel}.pt`)
-if (!fs.existsSync(whisperFile)) {
-  errors.push(`missing whisper model file: ${whisperFile}`)
+  const vadModelPath = path.join(modelsDir, 'silero_vad.onnx')
+  if (!fs.existsSync(vadModelPath)) {
+    errors.push(`missing silero VAD model: ${vadModelPath}`)
+  }
+
+  const whisperDir = path.join(modelsDir, 'whisper')
+  const whisperCacheDir = path.join(whisperDir, `models--Systran--faster-whisper-${whisperModel}`)
+  if (!fs.existsSync(whisperCacheDir)) {
+    errors.push(`missing faster-whisper model cache directory: ${whisperCacheDir}`)
+  }
 }
 
 const torchCacheDir = path.join(root, 'torch_cache')

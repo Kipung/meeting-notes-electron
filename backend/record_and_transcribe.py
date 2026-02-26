@@ -3,6 +3,7 @@ import collections
 import json
 import os
 import queue
+from pathlib import Path
 import signal
 import sys
 import threading
@@ -14,8 +15,7 @@ if sys.platform == "win32":
     import pyaudiowpatch as pyaudio
 else:
     import pyaudio
-import torch
-import whisper
+from faster_whisper import WhisperModel
 
 
 TARGET_RATE = 16000
@@ -57,40 +57,133 @@ class SessionState:
         self.worker = None
 
 
+class SileroOnnxVad:
+    def __init__(self, model_path: str):
+        import onnxruntime as ort
+
+        self.session = ort.InferenceSession(model_path, providers=["CPUExecutionProvider"])
+        self.input_names = [inp.name for inp in self.session.get_inputs()]
+        self.output_names = [out.name for out in self.session.get_outputs()]
+
+        self.sr_name = self._find_name(self.input_names, ("sr", "sample_rate"))
+        self.x_name = self._find_name(self.input_names, ("input", "x", "audio"))
+        self.state_input_names = [
+            name
+            for name in self.input_names
+            if name not in {self.x_name, self.sr_name}
+        ]
+
+        if self.x_name is None:
+            raise RuntimeError("unable to identify audio input tensor for silero_vad.onnx")
+        self.reset_states()
+
+    @staticmethod
+    def _find_name(candidates: list[str], expected: tuple[str, ...]) -> str | None:
+        for expected_name in expected:
+            for candidate in candidates:
+                if candidate == expected_name:
+                    return candidate
+        for expected_name in expected:
+            for candidate in candidates:
+                if expected_name in candidate.lower():
+                    return candidate
+        return None
+
+    def reset_states(self):
+        self.state_inputs: dict[str, np.ndarray] = {}
+        for name in self.state_input_names:
+            self.state_inputs[name] = np.zeros(self._state_shape_for(name), dtype=np.float32)
+
+    def _state_shape_for(self, name: str | None) -> tuple[int, ...]:
+        if name is None:
+            return (2, 1, 64)
+        for inp in self.session.get_inputs():
+            if inp.name != name:
+                continue
+            shape = []
+            for dim in inp.shape:
+                if isinstance(dim, int) and dim > 0:
+                    shape.append(dim)
+                else:
+                    shape.append(1)
+            if shape:
+                return tuple(shape)
+        return (2, 1, 64)
+
+    def __call__(self, audio_float: np.ndarray, sample_rate: int) -> float:
+        audio = np.asarray(audio_float, dtype=np.float32)
+        if audio.ndim == 1:
+            audio = np.expand_dims(audio, axis=0)
+        elif audio.ndim > 2:
+            audio = audio.reshape(1, -1)
+
+        inputs = {self.x_name: audio}
+        if self.sr_name is not None:
+            inputs[self.sr_name] = np.array([sample_rate], dtype=np.int64)
+        for name, value in self.state_inputs.items():
+            inputs[name] = value
+
+        outputs = self.session.run(None, inputs)
+        if len(outputs) == 0:
+            return 0.0
+
+        out_by_name = {
+            name: np.asarray(value, dtype=np.float32)
+            for name, value in zip(self.output_names, outputs)
+        }
+        # Prefer named state outputs when available.
+        for state_name in self.state_input_names:
+            if state_name in out_by_name:
+                self.state_inputs[state_name] = out_by_name[state_name]
+
+        # Fallback for models that return unnamed/mismatched state outputs.
+        if self.state_input_names:
+            unnamed_state_outputs = outputs[1:]
+            for idx, state_name in enumerate(self.state_input_names):
+                if state_name in out_by_name:
+                    continue
+                if idx < len(unnamed_state_outputs):
+                    self.state_inputs[state_name] = np.asarray(unnamed_state_outputs[idx], dtype=np.float32)
+
+        prob = outputs[0]
+        return float(np.asarray(prob).reshape(-1)[0])
+
+
 def _write_transcript(path: str, text: str):
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
     with open(path, "w", encoding="utf-8") as f:
         f.write(text)
 
 
+def _default_vad_model_path() -> str:
+    return str(Path(__file__).resolve().parent.parent / "models" / "silero_vad.onnx")
+
+
+def _default_whisper_root() -> str:
+    return str(Path(__file__).resolve().parent.parent / "models" / "whisper")
+
+
 def _vad_load():
-    try:
-        import torchaudio 
-    except Exception as e:
-        print(f"[vad] missing torchaudio: {e}", file=sys.stderr, flush=True)
+    model_path = os.environ.get("SILERO_VAD_MODEL") or _default_vad_model_path()
+    if not os.path.exists(model_path):
+        print(f"[vad] silero onnx model not found: {model_path}", file=sys.stderr, flush=True)
         return None
     try:
-        model, _utils = torch.hub.load(
-            repo_or_dir="snakers4/silero-vad",
-            model="silero_vad",
-            trust_repo=True,
-            force_reload=False,
-        )
-        return model
+        return SileroOnnxVad(model_path)
     except Exception as e:
-        print(f"[vad] failed to load silero-vad: {e}", file=sys.stderr, flush=True)
+        print(f"[vad] failed to load silero onnx model: {e}", file=sys.stderr, flush=True)
         return None
 
 
 def _vad_prob(vad_model, audio_float: np.ndarray, sample_rate: int) -> float:
     if vad_model is None:
         return 0.0
-    with torch.no_grad():
-        tensor = torch.from_numpy(audio_float)
-        prob = vad_model(tensor, sample_rate)
-        if isinstance(prob, torch.Tensor):
-            return float(prob.item())
-        return float(prob)
+    try:
+        prob = vad_model(audio_float, sample_rate)
+        return float(prob.item() if hasattr(prob, "item") else prob)
+    except Exception as e:
+        print(f"[vad] inference error: {e}", file=sys.stderr, flush=True)
+        return 0.0
 
 
 def _downmix_to_mono(audio_i16: np.ndarray, channels: int) -> np.ndarray:
@@ -147,6 +240,33 @@ def _mix_audio(mic_i16: np.ndarray, loop_i16: np.ndarray) -> np.ndarray:
     return np.rint(mixed).astype(np.int16)
 
 
+def _load_whisper_model(model_name: str, download_root: str | None):
+    whisper_root = download_root or _default_whisper_root()
+    device = "cpu"
+    compute_type = "int8"
+    try:
+        model = WhisperModel(
+            model_name,
+            device=device,
+            compute_type=compute_type,
+            download_root=whisper_root,
+            local_files_only=True,
+        )
+        # Force backend runtime initialization early so missing CUDA DLLs
+        # are detected here instead of in the transcription worker thread.
+        warmup_audio = np.zeros(TARGET_RATE, dtype=np.float32)
+        warmup_segments, _ = model.transcribe(warmup_audio, language="en", task="transcribe")
+        for _ in warmup_segments:
+            pass
+        return model, device, compute_type
+    except Exception as e:
+        print(
+            f"[transcribe] failed on {device} ({compute_type}), trying fallback: {e}",
+            file=sys.stderr,
+            flush=True,
+        )
+
+
 def main():
     model_name = "small.en"
     if "--model" in sys.argv:
@@ -165,18 +285,16 @@ def main():
     if hasattr(vad_model, "reset_states"):
         vad_model.reset_states()
 
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    print(f"[transcribe] loading model {model_name} on {device}", flush=True)
     try:
-        download_root = os.environ.get("WHISPER_ROOT")
-        whisper_model = whisper.load_model(model_name, device=device, download_root=download_root)
+        download_root = os.environ.get("WHISPER_ROOT") or _default_whisper_root()
+        print(f"[transcribe] loading model {model_name} from {download_root}", flush=True)
+        whisper_model, model_device, model_compute = _load_whisper_model(model_name, download_root)
+        print(f"[transcribe] loading model {model_name} on {model_device} ({model_compute})", flush=True)
     except Exception as e:
         print(f"[transcribe] failed to load model: {e}", file=sys.stderr, flush=True)
         sys.exit(3)
 
     chunk_ms = (TARGET_CHUNK / float(TARGET_RATE)) * 1000.0
-    pre_pad_frames = max(0, int(VAD_PRE_PAD_MS / chunk_ms)) if chunk_ms > 0 else 0
-    post_pad_frames = max(0, int(VAD_POST_PAD_MS / chunk_ms)) if chunk_ms > 0 else 0
     min_silence_frames = max(1, int(VAD_MIN_SILENCE_MS / chunk_ms)) if chunk_ms > 0 else 1
     min_speech_frames = max(1, int(VAD_MIN_SPEECH_MS / chunk_ms)) if chunk_ms > 0 else 1
     min_utterance_samples = int((VAD_MIN_SPEECH_MS / 1000.0) * TARGET_RATE)
@@ -291,7 +409,7 @@ def main():
             state.loopback_rate = loopback_rate
             state.mic_chunk = input_chunk
             state.loopback_chunk = loopback_chunk
-            state.pre_buffer = collections.deque(maxlen=pre_pad_frames or 1)
+            state.pre_buffer = collections.deque()
             if hasattr(vad_model, "reset_states"):
                 vad_model.reset_states()
             current_session["state"] = state
@@ -304,8 +422,12 @@ def main():
                             return
                         audio_i16 = item
                         audio_f32 = audio_i16.astype(np.float32) / 32768.0
-                        result = whisper_model.transcribe(audio_f32, language="en", task="transcribe", fp16=False)
-                        text = result.get("text", "").strip()
+                        segments, _info = whisper_model.transcribe(
+                            audio_f32,
+                            language="en",
+                            task="transcribe",
+                        )
+                        text = " ".join(segment.text.strip() for segment in segments if segment.text).strip()
                         if text:
                             with state.transcript_lock:
                                 state.transcript_parts.append(text)
@@ -346,9 +468,10 @@ def main():
         if not frames:
             return
         audio_i16 = np.concatenate(frames)
-        if audio_i16.size < min_utterance_samples:
+        if audio_i16.size == 0:
             return
-        state.utterance_queue.put(audio_i16)
+        if audio_i16.size >= min_utterance_samples:
+            state.utterance_queue.put(audio_i16)
 
     def recording_loop():
         while not shutdown_event.is_set():
@@ -446,11 +569,9 @@ def main():
                     else:
                         state.silence_buffer.append(audio_i16)
                         if len(state.silence_buffer) >= min_silence_frames:
-                            if post_pad_frames > 0:
-                                state.utterance_frames.extend(state.silence_buffer[:post_pad_frames])
+                            state.utterance_frames.extend(state.silence_buffer)
                             finalize_utterance(state, state.utterance_frames)
-                            tail = state.silence_buffer[-pre_pad_frames:] if pre_pad_frames > 0 else []
-                            state.pre_buffer = collections.deque(tail, maxlen=pre_pad_frames or 1)
+                            state.pre_buffer = collections.deque()
                             state.silence_buffer = []
                             state.utterance_frames = []
                             state.speaking = False
@@ -478,8 +599,7 @@ def main():
                 pass
 
             if state.silence_buffer and state.utterance_frames:
-                if post_pad_frames > 0:
-                    state.utterance_frames.extend(state.silence_buffer[:post_pad_frames])
+                state.utterance_frames.extend(state.silence_buffer)
             if state.utterance_frames:
                 finalize_utterance(state, state.utterance_frames)
 

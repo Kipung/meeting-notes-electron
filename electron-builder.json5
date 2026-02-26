@@ -32,14 +32,6 @@
       "to": "models"
     },
     {
-      "from": "whisper",
-      "to": "whisper"
-    },
-    {
-      "from": "torch_cache",
-      "to": "torch_cache"
-    },
-    {
       "from": "ffmpeg",
       "to": "ffmpeg"
     },

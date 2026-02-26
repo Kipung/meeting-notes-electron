@@ -1,16 +1,12 @@
 import json
 import os
 import sys
+from pathlib import Path
 
 try:
-    import torch
-except ImportError:
-    torch = None  # whisper will raise if torch is missing
-
-try:
-    import whisper
+    from faster_whisper import WhisperModel
 except Exception as e:
-    print(json.dumps({"event": "error", "msg": f"failed to import whisper: {e}"}))
+    print(json.dumps({"event": "error", "msg": f"failed to import faster-whisper: {e}"}))
     sys.exit(1)
 
 
@@ -18,10 +14,30 @@ def send(obj: dict):
     print(json.dumps(obj), flush=True)
 
 
+def default_whisper_root() -> str:
+    return str(Path(__file__).resolve().parent.parent / "models" / "whisper")
+
+
 def load_model(model_name: str):
-    device = "cuda" if torch and torch.cuda.is_available() else "cpu"
-    download_root = os.environ.get("WHISPER_ROOT")
-    return whisper.load_model(model_name, device=device, download_root=download_root)
+    download_root = os.environ.get("WHISPER_ROOT") or default_whisper_root()
+    for device, compute_type in (("cuda", "float16"), ("cpu", "int8")):
+        try:
+            model = WhisperModel(
+                model_name,
+                device=device,
+                compute_type=compute_type,
+                download_root=download_root,
+                local_files_only=True,
+            )
+            # Force backend runtime initialization early so missing CUDA DLLs
+            # are handled via fallback before real transcription starts.
+            warmup_segments, _ = model.transcribe([0.0] * 16000, language="en", task="transcribe")
+            for _ in warmup_segments:
+                pass
+            return model
+        except Exception:
+            continue
+    raise RuntimeError("unable to initialize faster-whisper on both cuda and cpu")
 
 
 def main():
@@ -47,8 +63,8 @@ def main():
 
     send({"event": "started", "out": audio_path, "transcript_out": transcript_out})
     try:
-        result = whisper_model.transcribe(audio_path, language="en", task="transcribe", fp16=False)
-        text = result.get("text", "").strip()
+        segments, _info = whisper_model.transcribe(audio_path, language="en", task="transcribe")
+        text = " ".join(segment.text.strip() for segment in segments if segment.text).strip()
         with open(transcript_out, "w", encoding="utf-8") as f:
             f.write(text)
         send({"event": "done", "out": transcript_out, "text": text})
