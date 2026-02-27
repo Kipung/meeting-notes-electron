@@ -135,12 +135,12 @@ def main():
     models_dir.mkdir(parents=True, exist_ok=True)
     log(f"Preparing models in: {models_dir}")
     ensure_whisper_model(args.whisper_model.strip() or DEFAULT_WHISPER_MODEL, whisper_dir)
-    # ensure_vad_model(vad_path)
-    # ensure_llama_model(
-    #     models_dir,
-    #     args.llama_model_name.strip() or DEFAULT_LLAMA_MODEL,
-    #     args.llama_url.strip() or DEFAULT_LLAMA_URL,
-    # )
+    ensure_vad_model(vad_path)
+    ensure_llama_model(
+        models_dir,
+        args.llama_model_name.strip() or DEFAULT_LLAMA_MODEL,
+        args.llama_url.strip() or DEFAULT_LLAMA_URL,
+    )
     log("All models are ready for packaging.")
 
 
