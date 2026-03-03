@@ -205,9 +205,12 @@
   line-height: 1.45;
 }
 
-.summary-display__editor {
-  min-height: 130px;
+.summary-display__text-block {
   margin: 0 0 12px;
+  color: #f1f1f1;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }
 
 .summary-display__list {

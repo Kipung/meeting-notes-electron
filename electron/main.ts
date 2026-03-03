@@ -28,6 +28,7 @@ export const RENDERER_DIST = path.join(process.env.APP_ROOT, 'dist')
 process.env.VITE_PUBLIC = VITE_DEV_SERVER_URL ? path.join(process.env.APP_ROOT, 'public') : RENDERER_DIST
 
 const DEFAULT_SUMMARY_MODEL_NAME = 'Llama-3.2-1B-Instruct-Q6_K.gguf'
+const DEFAULT_SILERO_VAD_URL = 'https://github.com/snakers4/silero-vad/raw/master/files/silero_vad.onnx'
 
 
 
@@ -42,6 +43,7 @@ let recordStdoutBuf = ''
 let setupState: 'idle' | 'running' | 'done' | 'error' = 'idle'
 let setupPromise: Promise<boolean> | null = null
 let downloadedSummaryModelPath: string | null = null
+let resolvedVadModelPath: string | null = null
 type FollowUpResult = { ok: boolean; text?: string; error?: string }
 type SummarizerEvent = {
   event?: string
@@ -200,6 +202,66 @@ function getSileroVadModelPath(): string {
     if (fs.existsSync(candidate)) return candidate
   }
   return path.join(getAppModelsRoot(), 'silero_vad.onnx')
+}
+
+function dedupePaths(paths: Array<string | undefined | null>): string[] {
+  const seen = new Set<string>()
+  const unique: string[] = []
+  for (const maybePath of paths) {
+    if (!maybePath) continue
+    const value = maybePath.trim()
+    if (!value) continue
+    const resolved = path.resolve(value)
+    if (seen.has(resolved)) continue
+    seen.add(resolved)
+    unique.push(resolved)
+  }
+  return unique
+}
+
+function findFileRecursive(rootDir: string, targetName: string, maxDepth = 8): string | null {
+  if (!fs.existsSync(rootDir)) return null
+  const stack: Array<{ dir: string; depth: number }> = [{ dir: rootDir, depth: 0 }]
+  while (stack.length > 0) {
+    const next = stack.pop()
+    if (!next) break
+    const { dir, depth } = next
+    let entries: fs.Dirent[] = []
+    try {
+      entries = fs.readdirSync(dir, { withFileTypes: true })
+    } catch {
+      continue
+    }
+    for (const entry of entries) {
+      const fullPath = path.join(dir, entry.name)
+      if (entry.isFile() && entry.name === targetName) return fullPath
+      if (entry.isDirectory() && depth < maxDepth) {
+        stack.push({ dir: fullPath, depth: depth + 1 })
+      }
+    }
+  }
+  return null
+}
+
+function materializeSileroVadFromCache(targetPath: string): boolean {
+  const cacheRoots = dedupePaths([
+    process.env['TORCH_HOME'],
+    getTorchCacheRoot(),
+    getPackagedTorchCacheRoot(),
+    path.join(process.env.APP_ROOT!, 'torch_cache'),
+  ])
+  for (const root of cacheRoots) {
+    const found = findFileRecursive(root, 'silero_vad.onnx')
+    if (!found) continue
+    try {
+      fs.mkdirSync(path.dirname(targetPath), { recursive: true })
+      fs.copyFileSync(found, targetPath)
+      return true
+    } catch (e) {
+      console.error('failed to copy silero_vad.onnx from torch cache', found, e)
+    }
+  }
+  return false
 }
 
 function getPackagedFfmpegDir(): string {
@@ -617,7 +679,8 @@ async function ensurePythonRuntime(): Promise<void> {
 async function runSetupScript(whisperModel: string, whisperDir: string): Promise<void> {
   const script = path.join(getBackendRoot(), 'setup.py')
   return new Promise((resolve, reject) => {
-    const env = { ...getPythonEnv(), WHISPER_MODEL: whisperModel, WHISPER_DIR: whisperDir }
+    const env: NodeJS.ProcessEnv = { ...getPythonEnv(), WHISPER_MODEL: whisperModel, WHISPER_DIR: whisperDir }
+    if (resolvedVadModelPath) env.SILERO_VAD_MODEL = resolvedVadModelPath
     const proc = spawn(getPythonCommand(), [script], {
       stdio: ['ignore', 'pipe', 'pipe'],
       env,
@@ -665,6 +728,39 @@ async function ensureWhisperModel(): Promise<void> {
 
   fs.mkdirSync(whisperDir, { recursive: true })
   await runSetupScript(model, whisperDir)
+}
+
+async function ensureVadModel(): Promise<string> {
+  const override = process.env['SILERO_VAD_MODEL']?.trim()
+  if (override) {
+    if (!fs.existsSync(override)) {
+      throw new Error(`SILERO_VAD_MODEL not found at ${override}`)
+    }
+    return override
+  }
+
+  const existingPath = getSileroVadModelPath()
+  if (fs.existsSync(existingPath)) {
+    return existingPath
+  }
+
+  const targetPath = path.join(getModelsRoot(), 'silero_vad.onnx')
+  if (materializeSileroVadFromCache(targetPath)) {
+    return targetPath
+  }
+
+  if (app.isPackaged) {
+    throw new Error(`silero VAD model missing in installer: ${targetPath}`)
+  }
+
+  const url = process.env['SILERO_VAD_URL']?.trim() || DEFAULT_SILERO_VAD_URL
+  sendBootstrapStatus('running', 'downloading VAD model', 0)
+  await downloadFile(url, targetPath, (progress) => {
+    if (typeof progress.percent === 'number') {
+      sendBootstrapStatus('running', 'downloading VAD model', progress.percent)
+    }
+  })
+  return targetPath
 }
 
 function resolveSummaryModelPath(): string | null {
@@ -760,12 +856,14 @@ async function ensureDependencies(): Promise<boolean> {
       ensureTorchCacheReady()
       await verifyFfmpegAvailable()
       await ensurePythonRuntime()
+      resolvedVadModelPath = await ensureVadModel()
       await ensureWhisperModel()
       await ensureSummaryModel()
       setupState = 'done'
       sendBootstrapStatus('done', 'ready', 100)
       return true
     } catch (e) {
+      resolvedVadModelPath = null
       setupState = 'error'
       const msg = e instanceof Error ? e.message : 'setup failed'
       sendBootstrapStatus('error', msg)
@@ -1295,7 +1393,8 @@ async function startBackend() {
   }
 
   const scriptPath = path.join(getBackendRoot(), 'record_and_transcribe.py')
-  const env = { ...getPythonEnv(), WHISPER_MODEL: currentModelName }
+  const env: NodeJS.ProcessEnv = { ...getPythonEnv(), WHISPER_MODEL: currentModelName }
+  env.SILERO_VAD_MODEL = resolvedVadModelPath || getSileroVadModelPath()
 
   startSummarizerIfNeeded(resolveSummaryModelPath())
 

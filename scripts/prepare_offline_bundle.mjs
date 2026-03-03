@@ -42,6 +42,30 @@ const copyDir = (src, dest) => {
   fs.cpSync(src, dest, { recursive: true, dereference: true })
 }
 
+const findFileRecursive = (rootDir, targetName, maxDepth = 8) => {
+  if (!fs.existsSync(rootDir)) return null
+  const stack = [{ dir: rootDir, depth: 0 }]
+  while (stack.length > 0) {
+    const next = stack.pop()
+    if (!next) break
+    const { dir, depth } = next
+    let entries = []
+    try {
+      entries = fs.readdirSync(dir, { withFileTypes: true })
+    } catch {
+      continue
+    }
+    for (const entry of entries) {
+      const fullPath = path.join(dir, entry.name)
+      if (entry.isFile() && entry.name === targetName) return fullPath
+      if (entry.isDirectory() && depth < maxDepth) {
+        stack.push({ dir: fullPath, depth: depth + 1 })
+      }
+    }
+  }
+  return null
+}
+
 const ensureCleanDir = (dest) => {
   if (fs.existsSync(dest)) {
     if (!force) {
@@ -110,6 +134,14 @@ runPython(
   `import torch; torch.hub.load("snakers4/silero-vad", "silero_vad", trust_repo=True, force_reload=False); print("ok")`,
   { TORCH_HOME: torchCacheDir }
 )
+const vadSource = findFileRecursive(torchCacheDir, 'silero_vad.onnx')
+if (!vadSource) {
+  throw new Error(`silero_vad.onnx not found under torch cache: ${torchCacheDir}`)
+}
+const modelsDir = path.join(root, 'models')
+fs.mkdirSync(modelsDir, { recursive: true })
+const vadDest = path.join(modelsDir, 'silero_vad.onnx')
+fs.copyFileSync(vadSource, vadDest)
 
 const resolveFfmpegPath = () => {
   if (ffmpegArg) return ffmpegArg
@@ -177,6 +209,7 @@ console.log('Offline bundle prepared:')
 console.log(`- python: ${destPython}`)
 console.log(`- whisper: ${whisperDest}`)
 console.log(`- torch cache: ${torchCacheDir}`)
+console.log(`- silero vad: ${vadDest}`)
 console.log(`- ffmpeg: ${ffmpegDest}`)
 if (libDest) {
   console.log(`- ffmpeg libs: ${libDest}`)

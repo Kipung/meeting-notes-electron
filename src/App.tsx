@@ -23,6 +23,9 @@ const STEP_LABELS: Record<StepState, string> = {
 const SECTION_HEADING_RE = /^\s*(summary|action items|high importance)\s*:\s*(.*)$/i
 const LEADING_BULLET_RE = /^\s*(?:[-*•]|\d+[.)])\s*/
 const ACTION_NONE_RE = /^(?:none|none\.|no action items?\.?|no actionable follow-?up(?: tasks?)?\.?)$/i
+const ACTION_PLACEHOLDER_RE = /\b(?:owner|topic|due date|tbd)\b/i
+const ACTION_INTENT_RE = /\b(?:will|need(?:s)? to|should|must|plan to|follow(?:-|\s)?up|email|submit|schedule|share|send|complete|finish|attend|check(?:\s+in)?|confirm|prepare|review|update|coordinate|contact|register|meet(?:\s+with)?|reach out|call|comment|get|add|ping)\b/i
+const ACTION_OWNER_SPLIT_RE = /\s+(?=(?:student|coach|advisor|tutor|instructor|professor|front desk)\b)/i
 
 type ParsedSummaryView = {
   summaryText: string
@@ -40,26 +43,62 @@ const cleanLine = (value: string) => value.trim().replace(/\s+/g, ' ')
 
 const normalizeBulletText = (value: string) => cleanLine(value.replace(LEADING_BULLET_RE, '')).replace(/[;]+$/, '')
 
+const normalizeSummaryText = (value: string) => {
+  let cleaned = cleanLine(value)
+  if (!cleaned) return ''
+  cleaned = cleaned
+    .replace(/\bspeaker\s*([0-9]+)\b/gi, (_match, speakerId: string) => `Speaker ${speakerId}`)
+    .replace(/([A-Za-z])(\d)/g, '$1 $2')
+    .replace(/(\d)([A-Za-z])/g, '$1 $2')
+    .replace(/\s+/g, ' ')
+    .trim()
+  return cleaned.replace(/(^|[.!?]\s+)([a-z])/g, (_match, prefix: string, letter: string) => `${prefix}${letter.toUpperCase()}`)
+}
+
+const canonicalActionItemKey = (value: string) =>
+  normalizeBulletText(value)
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+
+const splitActionCandidates = (line: string) =>
+  cleanLine(line)
+    .split(/\s*;\s+/)
+    .flatMap((segment) => segment.split(ACTION_OWNER_SPLIT_RE))
+    .map((segment) => normalizeBulletText(segment))
+    .filter(Boolean)
+
+const isLikelyActionItem = (value: string) => {
+  const cleaned = cleanLine(value)
+  if (!cleaned || ACTION_NONE_RE.test(cleaned)) return false
+  if (ACTION_PLACEHOLDER_RE.test(cleaned)) return false
+  const words = cleaned.split(/\s+/)
+  if (words.length < 3 || words.length > 32) return false
+  return ACTION_INTENT_RE.test(cleaned)
+}
+
 const parseActionItems = (lines: string[]) => {
   const items: string[] = []
   let sawNone = false
   for (const line of lines) {
     const cleaned = cleanLine(line)
     if (!cleaned) continue
-    const segments = cleaned.split(/\s*;\s+/)
-    for (const segment of segments) {
-      const item = normalizeBulletText(segment)
+    const segments = splitActionCandidates(cleaned)
+    for (const item of segments) {
       if (!item) continue
       if (ACTION_NONE_RE.test(item)) {
         sawNone = true
         continue
       }
+      if (!isLikelyActionItem(item)) continue
       items.push(item)
     }
   }
   const seen = new Set<string>()
   const unique = items.filter((item) => {
-    const key = item.toLowerCase()
+    const key = canonicalActionItemKey(item)
+    if (!key) return false
     if (seen.has(key)) return false
     seen.add(key)
     return true
@@ -110,7 +149,7 @@ const parseSummaryForView = (rawSummary: string): ParsedSummaryView => {
     }
   }
 
-  const summaryText = summaryLines.map(normalizeBulletText).filter(Boolean).join(' ')
+  const summaryText = normalizeSummaryText(summaryLines.map(normalizeBulletText).filter(Boolean).join(' '))
 
   const { items: actionItems, sawNone: actionItemsNone } = parseActionItems(actionLines)
   return {
@@ -545,15 +584,20 @@ function App() {
   const summaryMetaLines = summaryMetaFields.map(
     (field) => `${field.label}: ${field.missing ? SUMMARY_META_PLACEHOLDER : field.value}`
   )
-  const summaryWithMeta = summary
+  const normalizedSummaryBody = summary
     ? [
-        ...summaryMetaLines,
-        '',
         'Summary:',
         parsedSummary.summaryText || 'No summary content found.',
         '',
         'Action Items:',
         parsedSummary.actionItems.length > 0 ? parsedSummary.actionItems.map((item) => `- ${item}`).join('\n') : 'none.',
+      ].join('\n')
+    : ''
+  const summaryWithMeta = summary
+    ? [
+        ...summaryMetaLines,
+        '',
+        normalizedSummaryBody,
       ].join('\n')
     : summary
   const sessionDirLabel = sessionDir ? compactPath(sessionDir, sessionsRoot) : null
@@ -605,7 +649,7 @@ function App() {
     setFollowUpStatus('Generating follow-up email...')
     try {
       const res = await backend.generateFollowUpEmail({
-        summary,
+        summary: normalizedSummaryBody,
         studentName: studentName.trim() || undefined,
         instructions: followUpInstructions,
       })
@@ -926,12 +970,9 @@ function App() {
             </div>
             <>
               <div className="summary-display__section-title">Summary</div>
-              <textarea
-                className="output-panel__textarea summary-display__editor"
-                value={summary}
-                onChange={(e) => setSummary(e.target.value)}
-                placeholder="Summary will appear here..."
-              />
+              <div className="summary-display__text-block">
+                {summary ? parsedSummary.summaryText || 'No summary content found.' : 'Summary will appear here...'}
+              </div>
               <div className="summary-display__section-title">Action Items</div>
               {parsedSummary.actionItems.length > 0 ? (
                 <ul className="summary-display__list summary-display__list--actions">

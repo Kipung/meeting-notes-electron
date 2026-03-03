@@ -7,6 +7,7 @@ from backend.summary_formatting import (
     contains_high_importance_language,
     count_summary_sentences,
     extract_summary_body,
+    finalize_action_items_output,
     finalize_summary_output,
 )
 
@@ -241,6 +242,26 @@ class SummaryFormattingTests(unittest.TestCase):
 
         output = finalize_summary_output(raw_summary, transcript)
         self.assertLessEqual(count_summary_sentences(output), 4)
+
+    def test_finalize_action_items_output_filters_placeholder_and_recovers_from_transcript(self):
+        transcript = (
+            "Student will send the updated schedule by Friday. "
+            "Coach will follow up with the student next week."
+        )
+        raw_summary = (
+            "Summary:\n"
+            "speaker2 confirmed schedule updates and1 planning detail.\n\n"
+            "Action Items:\n"
+            "- Owner: Jr Topic: provide copy updated Due Date: TBD"
+        )
+
+        output = finalize_action_items_output(raw_summary, transcript)
+
+        self.assertIn("Speaker 2 confirmed schedule updates and 1 planning detail.", output)
+        self.assertIn("student: will send the updated schedule by friday", output.lower())
+        self.assertIn("follow up with the student next week", output.lower())
+        self.assertNotIn("Due Date", output)
+        self.assertNotIn("Owner:", output)
 
 
 if __name__ == "__main__":
