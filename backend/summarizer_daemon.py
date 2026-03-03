@@ -9,9 +9,9 @@ import time
 from typing import Callable, List, Optional
 
 try:
-    from .summary_formatting import finalize_summary_output, split_sentences
+    from .summary_formatting import finalize_action_items_output, split_sentences
 except ImportError:
-    from summary_formatting import finalize_summary_output, split_sentences
+    from summary_formatting import finalize_action_items_output, split_sentences
 
 try:
     from llama_cpp import Llama
@@ -65,10 +65,12 @@ DEFAULT_PROMPT = (
     "Make sure the summary explicitly includes any high-importance decisions, risks, blockers, or deadlines when they appear.\n"
     "For student success coaching sessions, highlight the student's current goal/progress, primary barriers, and agreed support plan when present.\n"
     "Stay focused on the meeting content and do not add unrelated information.\n"
+    "Use normal sentence capitalization and spacing (for example, 'Speaker 2', not 'speaker2' or 'and1').\n"
     "If metadata such as Modality, Subject, Student ID, Student Name, or Coach is provided at the top of the input, include relevant details briefly in the summary.\n"
     "In 'Action Items', include up to five bullets only for explicit follow-up tasks supported by the transcript.\n"
     "Prioritize concrete student-success follow-ups (assignments, outreach, tutoring, scheduling, resource referrals).\n"
     "Each action bullet should include owner/topic and due date or timing when available.\n"
+    "Do not output placeholder template text such as 'Owner', 'Topic', or 'Due Date'.\n"
     "If no actionable follow-up is clearly supported, write 'Action Items: none.'\n"
     "Do not invent details and do not add extra sections.\n"
 )
@@ -508,8 +510,7 @@ class SummarizerDaemon:
             except Exception as e:
                 self.send({"event": "error", "msg": f"summarization error: {e}", "out": out_path, "context": context})
                 return
-            summary = finalize_summary_output(summary, text)
-
+            summary = finalize_action_items_output(summary, text)
             dur = time.time() - start
             if out_path:
                 try:

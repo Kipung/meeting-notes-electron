@@ -238,6 +238,10 @@ ACTION_COMMITMENT_RE = re.compile(
     r"(?:will|need(?:\s+to)?|needs(?:\s+to)?|should|must|have to|plan to|am\s+going\s+to|are\s+going\s+to|going\s+to|gonna)\b",
     re.IGNORECASE,
 )
+ACTION_BARE_MODAL_RE = re.compile(
+    r"^(?:will|need(?:\s+to)?|needs(?:\s+to)?|should|must|have to|plan to)\s+\w+",
+    re.IGNORECASE,
+)
 ACTION_REQUEST_RE = re.compile(r"^(?:please\s+)?(?:can|could|would)\s+you\s+.+$", re.IGNORECASE)
 ACTION_LETS_RE = re.compile(r"^(?:let's|lets)\s+.+$", re.IGNORECASE)
 SUMMARY_FRAGMENT_PREFIXES = (
@@ -498,7 +502,7 @@ def _has_explicit_action_intent(text: str) -> bool:
         return False
     if ACTION_REQUEST_RE.match(candidate) or ACTION_LETS_RE.match(candidate):
         return True
-    return bool(ACTION_COMMITMENT_RE.match(candidate) or ACTION_IMPERATIVE_RE.match(candidate))
+    return bool(ACTION_COMMITMENT_RE.match(candidate) or ACTION_BARE_MODAL_RE.match(candidate) or ACTION_IMPERATIVE_RE.match(candidate))
 
 
 def _is_bad_summary_sentence(sentence: str, transcript_words: Set[str]) -> bool:
@@ -863,6 +867,46 @@ def _normalise_summary_body(summary_body: str, transcript: str, high_importance_
         if sentence.strip()
     ]
     return " ".join(summary_sentences).strip()
+
+
+def finalize_action_items_output(summary: str, transcript: str) -> str:
+    sections = parse_sections(summary)
+    transcript_words = _content_word_set(transcript)
+    transcript_sentences = split_sentences(transcript)
+    summary_body = _collapse_spaces(sections.get(SUMMARY_MARKER, ""))
+    if summary_body:
+        summary_body = re.sub(r"\bspeaker\s*([0-9]+)\b", r"Speaker \1", summary_body, flags=re.IGNORECASE)
+        summary_body = re.sub(r"([A-Za-z])(\d)", r"\1 \2", summary_body)
+        summary_body = re.sub(r"(\d)([A-Za-z])", r"\1 \2", summary_body)
+        summary_body = _collapse_spaces(summary_body)
+    if not summary_body:
+        summary_body = "Not enough content to summarize."
+
+    action_text = sections.get(ACTION_ITEMS_MARKER, "")
+    action_bullets = [
+        bullet
+        for bullet in parse_bullets(action_text, MAX_ACTION_ITEMS)
+        if _is_valid_action_bullet(
+            bullet[2:] if bullet.startswith("- ") else bullet,
+            transcript_words,
+            transcript_sentences,
+        )
+    ]
+    if not action_bullets:
+        action_bullets = _extract_explicit_action_bullets(
+            transcript,
+            transcript_words,
+            transcript_sentences,
+            MAX_ACTION_ITEMS,
+        )
+
+    lines = [SUMMARY_MARKER, summary_body, ""]
+    if action_bullets:
+        lines.append(ACTION_ITEMS_MARKER)
+        lines.extend(action_bullets)
+    else:
+        lines.append(f"{ACTION_ITEMS_MARKER} none.")
+    return "\n".join(lines).strip()
 
 
 def finalize_summary_output(summary: str, transcript: str) -> str:

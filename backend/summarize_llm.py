@@ -8,9 +8,9 @@ except Exception as e:
     sys.exit(1)
 
 try:
-    from .summary_formatting import count_summary_sentences, finalize_summary_output
+    from .summary_formatting import count_summary_sentences, finalize_action_items_output
 except ImportError:
-    from summary_formatting import count_summary_sentences, finalize_summary_output
+    from summary_formatting import count_summary_sentences, finalize_action_items_output
 
 
 def count_words(text: str) -> int:
@@ -33,9 +33,11 @@ DEFAULT_PROMPT = (
     "Make sure the summary explicitly includes any high-importance decisions, risks, blockers, or deadlines when they appear.\n"
     "For student success coaching sessions, highlight the student's current goal/progress, primary barriers, and agreed support plan when present.\n"
     "Stay focused on the meeting content and do not add unrelated information.\n"
+    "Use normal sentence capitalization and spacing (for example, 'Speaker 2', not 'speaker2' or 'and1').\n"
     "In 'Action Items', include up to five bullets only for explicit follow-up tasks supported by the transcript.\n"
     "Prioritize concrete student-success follow-ups (assignments, outreach, tutoring, scheduling, resource referrals).\n"
     "Each action bullet should include owner/topic and due date or timing when available.\n"
+    "Do not output placeholder template text such as 'Owner', 'Topic', or 'Due Date'.\n"
     "If no actionable follow-up is clearly supported, write 'Action Items: none.'\n"
     "Do not invent details and do not add extra sections.\n"
 )
@@ -131,7 +133,7 @@ def main():
 
     client, summary = summarize_direct(model_path, text, n_ctx=n_ctx)
     summary = ensure_min_sentences(summary, text, client)
-    summary = finalize_summary_output(summary, text)
+    summary = finalize_action_items_output(summary, text)
 
     output_path = os.getenv("SUM_SUMMARY_OUT")
     if output_path:
