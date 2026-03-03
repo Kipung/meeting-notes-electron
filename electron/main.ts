@@ -51,7 +51,7 @@ type SummarizerEvent = {
   msg?: string
 }
 const followUpRequests = new Map<string, { resolve: (value: FollowUpResult) => void; timeout: NodeJS.Timeout }>()
-const CHUNK_WORD_THRESHOLD = 600
+const CHUNK_WORD_THRESHOLD = 900
 const AUDIO_FILE_EXTENSIONS = new Set(['.wav', '.mp3', '.m4a', '.flac', '.aac', '.ogg', '.webm'])
 const TRANSCRIPT_FILE_EXTENSIONS = new Set(['.txt', '.md', '.markdown', '.srt', '.vtt', '.log', '.json'])
 type ChunkTask = { id: number; text: string; sessionDir: string | null }

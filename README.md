@@ -312,10 +312,9 @@ All of the bundled python helpers now read configuration from environment variab
 WHISPER_MODEL=small.en python3 backend/record_and_transcribe.py
 WHISPER_MODEL=small.en WHISPER_DIR=/path/to/whisper/python3 backend/setup.py
 TRANSCRIBE_AUDIO=/path/to/audio.wav TRANSCRIPT_OUT=/path/to/transcript.txt TRANSCRIBE_MODEL=small.en python3 backend/transcribe_file.py
-SUMMODEL_PATH=models/<your-model>.gguf SUM_TRANSCRIPT_FILE=app.getPath('userData')/sessions/<timestamp>/transcript.txt SUM_SUMMARY_OUT=app.getPath('userData')/sessions/<timestamp>/summary.txt python3 backend/summarize_llm.py
 ```
 
-`SUM_TEXT` can be provided in lieu of `SUM_TRANSCRIPT_FILE`, and `SUM_N_CTX` or `SUM_MIN_WORDS` are honored the same way as the daemon.
+For summarization debugging, use `python3 backend/summarizer_daemon.py` and send JSON commands over stdin (`summarize`, `followup_email`, `load_model`).
 
 ## Faster end-of-session processing
 

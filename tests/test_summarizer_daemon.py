@@ -34,7 +34,22 @@ class StaticClient:
         return {"choices": [{"text": self.response}]}
 
 
+class StreamingDeltaClient:
+    def __init__(self, parts):
+        self.parts = parts
+
+    def create_completion(self, *, prompt: str, max_tokens: int, temperature: float, stream: bool = False):
+        if not stream:
+            return {"choices": [{"text": "".join(self.parts)}]}
+        return iter([{"choices": [{"text": part}]} for part in self.parts])
+
+
 class SummarizerDaemonTests(unittest.TestCase):
+    def test_prompts_forbid_invented_roles_and_generic_admin_tasks(self):
+        self.assertIn("Do not invent facts, names, organizations, job titles, or speaker roles.", DEFAULT_PROMPT)
+        self.assertIn("Do not create generic admin tasks", DEFAULT_PROMPT)
+        self.assertIn("Do not invent facts, names, organizations, job titles, or speaker roles.", CHUNK_SUMMARY_PROMPT)
+
     def test_summarize_with_llm_retries_with_smaller_max_tokens_on_context_overflow(self):
         client = OverflowRetryClient()
         result = summarize_with_llm(client, "This is a test transcript.", DEFAULT_PROMPT, max_tokens=1024)
@@ -94,6 +109,19 @@ class SummarizerDaemonTests(unittest.TestCase):
 
         self.assertTrue(client.calls)
         self.assertIn(CHUNK_SUMMARY_PROMPT.strip(), client.calls[0]["prompt"])
+
+    def test_streaming_delta_chunks_do_not_drop_repeated_tokens(self):
+        client = StreamingDeltaClient(["the student reviewed ", "the ", "schedule and ", "the timeline."])
+        streamed = []
+        result = summarize_with_llm(
+            client,
+            "transcript text",
+            DEFAULT_PROMPT,
+            max_tokens=128,
+            on_delta=lambda d: streamed.append(d),
+        )
+        self.assertEqual(result, "the student reviewed the schedule and the timeline.")
+        self.assertEqual("".join(streamed), "the student reviewed the schedule and the timeline.")
 
     def test_compress_chunk_summaries_respects_budget_and_keeps_high_importance(self):
         chunk_summaries = [

@@ -20,23 +20,24 @@ const STEP_LABELS: Record<StepState, string> = {
   done: 'done',
   error: 'error',
 }
-const SECTION_HEADING_RE = /^\s*(summary|action items|high importance)\s*:\s*(.*)$/i
+const HEADING_PREFIX_RE = /^[-*#>\s]+/
+const SUMMARY_HEADING_LINE_RE = /^summary(?:\s*[:\-]|$)/i
+const ACTION_HEADING_LINE_RE = /^action items?(?:\s*[:\-]|$)/i
+const HIGH_IMPORTANCE_HEADING_LINE_RE = /^high importance(?:\s*[:\-]|$)/i
 const LEADING_BULLET_RE = /^\s*(?:[-*•]|\d+[.)])\s*/
 const ACTION_NONE_RE = /^(?:none|none\.|no action items?\.?|no actionable follow-?up(?: tasks?)?\.?)$/i
 const ACTION_PLACEHOLDER_RE = /\b(?:owner|topic|due date|tbd)\b/i
-const ACTION_INTENT_RE = /\b(?:will|need(?:s)? to|should|must|plan to|follow(?:-|\s)?up|email|submit|schedule|share|send|complete|finish|attend|check(?:\s+in)?|confirm|prepare|review|update|coordinate|contact|register|meet(?:\s+with)?|reach out|call|comment|get|add|ping)\b/i
-const ACTION_OWNER_SPLIT_RE = /\s+(?=(?:student|coach|advisor|tutor|instructor|professor|front desk)\b)/i
+const ACTION_INSTRUCTION_RE = /\b(?:return only|in summary|in action items?|summary must|stay focused|do not add|do not invent|include up to|if no actionable|if no explicit|each bullet)\b/i
+const ACTION_INCOMPLETE_END_RE =
+  /\b(?:to|for|with|and|or|the|a|an|of|in|on|by|from|about|around|into|through|that|this|these|those)\s*$/i
+const SUMMARY_META_LINE_RE = /^(?:modality|subject|student id|student name|coach)\s*:/i
+const MAX_ACTION_ITEMS = 5
 
 type ParsedSummaryView = {
   summaryText: string
   actionItems: string[]
   actionItemsNone: boolean
   hasActionSection: boolean
-}
-type SummaryMetaField = {
-  label: string
-  value: string
-  missing: boolean
 }
 
 const cleanLine = (value: string) => value.trim().replace(/\s+/g, ' ')
@@ -47,12 +48,22 @@ const normalizeSummaryText = (value: string) => {
   let cleaned = cleanLine(value)
   if (!cleaned) return ''
   cleaned = cleaned
+    .replace(/^example\s+\d+\s*/i, '')
     .replace(/\bspeaker\s*([0-9]+)\b/gi, (_match, speakerId: string) => `Speaker ${speakerId}`)
     .replace(/([A-Za-z])(\d)/g, '$1 $2')
     .replace(/(\d)([A-Za-z])/g, '$1 $2')
     .replace(/\s+/g, ' ')
     .trim()
   return cleaned.replace(/(^|[.!?]\s+)([a-z])/g, (_match, prefix: string, letter: string) => `${prefix}${letter.toUpperCase()}`)
+}
+
+const splitInlineActionMarker = (line: string) => {
+  const marker = /\baction items?\s*:\s*/i
+  const match = marker.exec(line)
+  if (!match || typeof match.index !== 'number') return null
+  const before = cleanLine(line.slice(0, match.index))
+  const after = cleanLine(line.slice(match.index + match[0].length))
+  return { before, after }
 }
 
 const canonicalActionItemKey = (value: string) =>
@@ -65,18 +76,8 @@ const canonicalActionItemKey = (value: string) =>
 const splitActionCandidates = (line: string) =>
   cleanLine(line)
     .split(/\s*;\s+/)
-    .flatMap((segment) => segment.split(ACTION_OWNER_SPLIT_RE))
     .map((segment) => normalizeBulletText(segment))
     .filter(Boolean)
-
-const isLikelyActionItem = (value: string) => {
-  const cleaned = cleanLine(value)
-  if (!cleaned || ACTION_NONE_RE.test(cleaned)) return false
-  if (ACTION_PLACEHOLDER_RE.test(cleaned)) return false
-  const words = cleaned.split(/\s+/)
-  if (words.length < 3 || words.length > 32) return false
-  return ACTION_INTENT_RE.test(cleaned)
-}
 
 const parseActionItems = (lines: string[]) => {
   const items: string[] = []
@@ -91,9 +92,15 @@ const parseActionItems = (lines: string[]) => {
         sawNone = true
         continue
       }
-      if (!isLikelyActionItem(item)) continue
-      items.push(item)
+      if (ACTION_PLACEHOLDER_RE.test(item)) continue
+      if (ACTION_INSTRUCTION_RE.test(item)) continue
+      const words = item.split(/\s+/)
+      if (words.length < 2 || words.length > 28) continue
+      if (ACTION_INCOMPLETE_END_RE.test(item)) continue
+      items.push(item[0].toUpperCase() + item.slice(1))
+      if (items.length >= MAX_ACTION_ITEMS) break
     }
+    if (items.length >= MAX_ACTION_ITEMS) break
   }
   const seen = new Set<string>()
   const unique = items.filter((item) => {
@@ -103,35 +110,79 @@ const parseActionItems = (lines: string[]) => {
     seen.add(key)
     return true
   })
-  return { items: unique, sawNone }
+  return { items: unique.slice(0, MAX_ACTION_ITEMS), sawNone }
+}
+
+const stripHeadingPrefix = (line: string) => line.trim().replace(HEADING_PREFIX_RE, '')
+
+const getSectionHeading = (line: string): 'summary' | 'action' | 'high' | null => {
+  const normalized = stripHeadingPrefix(line)
+  if (SUMMARY_HEADING_LINE_RE.test(normalized)) return 'summary'
+  if (ACTION_HEADING_LINE_RE.test(normalized)) return 'action'
+  if (HIGH_IMPORTANCE_HEADING_LINE_RE.test(normalized)) return 'high'
+  return null
+}
+
+const getHeadingRemainder = (line: string) =>
+  stripHeadingPrefix(line).replace(/^(?:summary|action items?|high importance)\s*(?::|-)?\s*/i, '').trim()
+
+const extractSummaryFallbackText = (rawSummary: string) => {
+  const normalized = rawSummary.replace(/\r\n/g, '\n').trim()
+  if (!normalized) return ''
+  const lines = normalized.split('\n')
+  const kept: string[] = []
+  for (const line of lines) {
+    const cleaned = cleanLine(line)
+    if (!cleaned) continue
+    const heading = getSectionHeading(cleaned)
+    if (heading === 'action') break
+    if (heading === 'summary' || heading === 'high') {
+      const remainder = cleanLine(getHeadingRemainder(cleaned))
+      if (remainder) kept.push(remainder)
+      continue
+    }
+    const inlineSplit = splitInlineActionMarker(cleaned)
+    if (inlineSplit) {
+      if (inlineSplit.before) kept.push(inlineSplit.before)
+      break
+    }
+    if (!SUMMARY_META_LINE_RE.test(cleaned)) kept.push(cleaned)
+  }
+  return normalizeSummaryText(kept.join(' '))
 }
 
 const parseSummaryForView = (rawSummary: string): ParsedSummaryView => {
-  const lines = rawSummary.replace(/\r\n/g, '\n').split('\n')
+  const normalized = rawSummary.replace(/\r\n/g, '\n').trim()
+  if (!normalized) {
+    return {
+      summaryText: '',
+      actionItems: [],
+      actionItemsNone: false,
+      hasActionSection: false,
+    }
+  }
+  const lines = normalized.split('\n')
   const summaryLines: string[] = []
   const actionLines: string[] = []
-  let currentSection: 'summary' | 'action' | 'other' = 'other'
-  let sawSummaryHeading = false
+  let currentSection: 'summary' | 'action' = 'summary'
   let sawActionHeading = false
 
   for (const line of lines) {
-    const match = line.match(SECTION_HEADING_RE)
-    if (match) {
-      const section = match[1].toLowerCase()
-      const remainder = cleanLine(match[2] || '')
-      if (section === 'summary') {
+    const heading = getSectionHeading(line)
+    if (heading) {
+      const remainder = cleanLine(getHeadingRemainder(line))
+      if (heading === 'summary') {
         currentSection = 'summary'
-        sawSummaryHeading = true
         if (remainder) summaryLines.push(remainder)
         continue
       }
-      if (section === 'action items') {
+      if (heading === 'action') {
         currentSection = 'action'
         sawActionHeading = true
         if (remainder) actionLines.push(remainder)
         continue
       }
-      if (section === 'high importance') {
+      if (heading === 'high') {
         currentSection = 'summary'
         if (remainder) summaryLines.push(remainder)
         continue
@@ -140,16 +191,25 @@ const parseSummaryForView = (rawSummary: string): ParsedSummaryView => {
 
     const cleaned = line.trim()
     if (!cleaned) continue
+    if (currentSection === 'summary') {
+      const inlineSplit = splitInlineActionMarker(cleaned)
+      if (inlineSplit) {
+        if (inlineSplit.before) summaryLines.push(inlineSplit.before)
+        currentSection = 'action'
+        sawActionHeading = true
+        if (inlineSplit.after) actionLines.push(inlineSplit.after)
+        continue
+      }
+      summaryLines.push(cleaned)
+      continue
+    }
     if (currentSection === 'action') {
       actionLines.push(cleaned)
-    } else if (currentSection === 'summary') {
-      summaryLines.push(cleaned)
-    } else if (!sawSummaryHeading && !sawActionHeading) {
-      summaryLines.push(cleaned)
     }
   }
 
-  const summaryText = normalizeSummaryText(summaryLines.map(normalizeBulletText).filter(Boolean).join(' '))
+  const parsedSummaryText = normalizeSummaryText(summaryLines.map(normalizeBulletText).filter(Boolean).join(' '))
+  const summaryText = parsedSummaryText || extractSummaryFallbackText(rawSummary)
 
   const { items: actionItems, sawNone: actionItemsNone } = parseActionItems(actionLines)
   return {
@@ -561,33 +621,27 @@ function App() {
   const canDeleteAudio = Boolean(sessionDir) && transcriptionState === 'done' && recordingState !== 'running' && recordingState !== 'paused'
   const followUpActionLabel = followUpGenerating ? 'Generating...' : followUpEmail ? 'Regenerate from summary' : 'Generate from summary'
   const parsedSummary = useMemo(() => parseSummaryForView(summary), [summary])
-  const summaryMetaFields = useMemo<SummaryMetaField[]>(
-    () => {
-      const fields: Array<{ label: string; rawValue: string }> = [
-        { label: 'Modality', rawValue: sessionModality },
-        { label: 'Subject', rawValue: sessionSubject },
-        { label: 'Student ID', rawValue: studentId },
-        { label: 'Student Name', rawValue: studentName },
-        { label: 'Coach', rawValue: coachInitials },
-      ]
-      return fields.map((field) => {
-        const value = cleanLine(field.rawValue)
-        return {
-          label: field.label,
-          value,
-          missing: !value,
-        }
-      })
-    },
-    [sessionModality, sessionSubject, studentId, studentName, coachInitials]
+  const effectiveSummaryText = parsedSummary.summaryText || extractSummaryFallbackText(summary)
+  const summaryDateText = useMemo(
+    () =>
+      new Intl.DateTimeFormat('en-US', {
+        year: 'numeric',
+        month: '2-digit',
+        day: '2-digit',
+      }).format(new Date()),
+    []
   )
-  const summaryMetaLines = summaryMetaFields.map(
-    (field) => `${field.label}: ${field.missing ? SUMMARY_META_PLACEHOLDER : field.value}`
-  )
+  const summaryModalityText = cleanLine(sessionModality) || SUMMARY_META_PLACEHOLDER
+  const summarySubjectText = cleanLine(sessionSubject) || SUMMARY_META_PLACEHOLDER
+  const summaryCoachText = cleanLine(coachInitials) || SUMMARY_META_PLACEHOLDER
+  const summaryStudentNameText = cleanLine(studentName) || SUMMARY_META_PLACEHOLDER
+  const summaryStudentIdText = cleanLine(studentId) || SUMMARY_META_PLACEHOLDER
+  const summaryHeaderLine = `${summaryDateText} ${summaryModalityText} re: ${summarySubjectText} - ${summaryCoachText}`
+  const summaryHeaderSubline = `Student: ${summaryStudentNameText} | Student ID: ${summaryStudentIdText}`
   const normalizedSummaryBody = summary
     ? [
         'Summary:',
-        parsedSummary.summaryText || 'No summary content found.',
+        effectiveSummaryText || 'No summary content found.',
         '',
         'Action Items:',
         parsedSummary.actionItems.length > 0 ? parsedSummary.actionItems.map((item) => `- ${item}`).join('\n') : 'none.',
@@ -595,7 +649,8 @@ function App() {
     : ''
   const summaryWithMeta = summary
     ? [
-        ...summaryMetaLines,
+        summaryHeaderLine,
+        summaryHeaderSubline,
         '',
         normalizedSummaryBody,
       ].join('\n')
@@ -958,20 +1013,14 @@ function App() {
             Copy summary
           </button>
           <div className="summary-display">
-            <div className="summary-display__meta">
-              {summaryMetaFields.map((field) => (
-                <div className="summary-display__meta-row" key={field.label}>
-                  <span className="summary-display__meta-label">{field.label}:</span>
-                  <span className={field.missing ? 'summary-display__meta-value summary-display__meta-value--placeholder' : 'summary-display__meta-value'}>
-                    {field.missing ? SUMMARY_META_PLACEHOLDER : field.value}
-                  </span>
-                </div>
-              ))}
+            <div className="summary-display__meta-inline">
+              <div className="summary-display__meta-line">{summaryHeaderLine}</div>
+              <div className="summary-display__meta-subline">{summaryHeaderSubline}</div>
             </div>
             <>
               <div className="summary-display__section-title">Summary</div>
               <div className="summary-display__text-block">
-                {summary ? parsedSummary.summaryText || 'No summary content found.' : 'Summary will appear here...'}
+                {summary ? effectiveSummaryText || 'No summary content found.' : 'Summary will appear here...'}
               </div>
               <div className="summary-display__section-title">Action Items</div>
               {parsedSummary.actionItems.length > 0 ? (

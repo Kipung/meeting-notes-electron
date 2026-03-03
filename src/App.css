@@ -162,33 +162,21 @@
   line-height: 1.45;
 }
 
-.summary-display__meta {
-  display: grid;
-  grid-template-columns: 1fr;
-  gap: 4px;
-  margin: 0 0 12px;
-  padding: 0 0 10px;
-  border-bottom: 1px solid #2b2b2b;
+.summary-display__meta-inline {
+  margin: 0 0 10px;
 }
 
-.summary-display__meta-row {
-  display: flex;
-  gap: 8px;
-  flex-wrap: wrap;
-}
-
-.summary-display__meta-label {
-  color: #cfcfcf;
-  font-weight: 600;
-}
-
-.summary-display__meta-value {
+.summary-display__meta-line {
   color: #f1f1f1;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  overflow-wrap: anywhere;
 }
 
-.summary-display__meta-value--placeholder {
-  color: #9f9f9f;
-  font-style: italic;
+.summary-display__meta-subline {
+  margin-top: 4px;
+  color: #c8c8c8;
+  overflow-wrap: anywhere;
 }
 
 .summary-display__section-title {

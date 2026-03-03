@@ -9,9 +9,9 @@ import time
 from typing import Callable, List, Optional
 
 try:
-    from .summary_formatting import finalize_action_items_output, split_sentences
+    from .summary_formatting import split_sentences
 except ImportError:
-    from summary_formatting import finalize_action_items_output, split_sentences
+    from summary_formatting import split_sentences
 
 try:
     from llama_cpp import Llama
@@ -24,6 +24,25 @@ except Exception as e:
 
 def count_words(text: str) -> int:
     return len(text.split())
+
+
+def normalize_transcript_for_summary(text: str) -> str:
+    cleaned = (text or "").replace("\r\n", "\n").replace("\r", "\n")
+    cleaned = re.sub(r"\[(?:\d{1,2}:){1,2}\d{2}\]\s*", "", cleaned)
+    lines: List[str] = []
+    for raw_line in cleaned.split("\n"):
+        line = re.sub(r"\s+", " ", raw_line).strip()
+        if not line:
+            continue
+        if line.lower() in {"so", "um", "uh", "okay", "copy"}:
+            continue
+        lines.append(line)
+    if not lines:
+        return ""
+    merged = " ".join(lines)
+    merged = re.sub(r"\s*(Speaker\s+(?:unknown|\d+)\s*:)", r"\n\1 ", merged, flags=re.IGNORECASE)
+    merged = re.sub(r"\n{2,}", "\n", merged)
+    return merged.strip()
 
 
 def min_words_from_env(default: int) -> int:
@@ -58,29 +77,36 @@ def max_tokens_from_env(default: int) -> int:
 
 DEFAULT_PROMPT = (
     "You are an assistant that summarizes meeting transcripts.\n"
-    "Return only these sections in this exact order with the same headings:\n"
+    "Use only the provided transcript.\n"
+    "Do not invent facts, names, organizations, job titles, or speaker roles.\n"
+    "If a role/title is not explicitly stated in the transcript, keep references generic (for example: Speaker 1, Speaker 2, participant, student, coach).\n"
+    "Return exactly two sections in this order:\n"
     "Summary:\n"
     "Action Items:\n"
-    "In 'Summary', write 3-4 concise sentences (max 140 words), grounded only in the transcript.\n"
-    "Make sure the summary explicitly includes any high-importance decisions, risks, blockers, or deadlines when they appear.\n"
-    "For student success coaching sessions, highlight the student's current goal/progress, primary barriers, and agreed support plan when present.\n"
-    "Stay focused on the meeting content and do not add unrelated information.\n"
-    "Use normal sentence capitalization and spacing (for example, 'Speaker 2', not 'speaker2' or 'and1').\n"
-    "If metadata such as Modality, Subject, Student ID, Student Name, or Coach is provided at the top of the input, include relevant details briefly in the summary.\n"
-    "In 'Action Items', include up to five bullets only for explicit follow-up tasks supported by the transcript.\n"
-    "Prioritize concrete student-success follow-ups (assignments, outreach, tutoring, scheduling, resource referrals).\n"
-    "Each action bullet should include owner/topic and due date or timing when available.\n"
-    "Do not output placeholder template text such as 'Owner', 'Topic', or 'Due Date'.\n"
-    "If no actionable follow-up is clearly supported, write 'Action Items: none.'\n"
-    "Do not invent details and do not add extra sections.\n"
+    "Summary must be 3-5 sentences, maximum 180 words, with no repeated sentence or clause.\n"
+    "Include key decisions, blockers, and deadlines when present.\n"
+    "Action Items must include only explicit follow-up tasks from the transcript, up to 5 bullets.\n"
+    "Do not create generic admin tasks (for example: send follow-up email, schedule a meeting, notify leadership) unless explicitly stated in the transcript.\n"
+    "Each bullet must be concise and actionable.\n"
+    "If no explicit tasks exist, write exactly: Action Items: none.\n"
+    "Do not output any extra headings (for example: Meeting Notes, Notes, High Importance).\n"
 )
+
+
+
 DEFAULT_CHUNK_WORDS = int(os.getenv("SUM_CHUNK_WORDS", "200"))
 CHUNK_SUMMARY_PROMPT = (
-    "You are an assistant that summarizes meeting transcripts.\n"
-    "Produce a concise 2-3 sentence summary focused only on the provided text.\n"
-    "Ground every sentence in the transcript and keep the paragraph tidy and self-contained.\n"
-    "Do not include an 'Action Items:' section in this response; only provide the summary paragraph.\n"
+    "You are an assistant that summarizes one chunk of a meeting transcript.\n"
+    "Use only the provided text.\n"
+    "Do not invent facts, names, organizations, job titles, or speaker roles.\n"
+    "If a role/title is not explicitly stated, keep references generic (for example: Speaker 1, Speaker 2, participant).\n"
+    "Write exactly one paragraph of 2-3 sentences, maximum 70 words.\n"
+    "Cover only key facts/decisions/blockers in this chunk.\n"
+    "Do not repeat phrases or sentences.\n"
+    "Do not include headings, bullets, or an Action Items section.\n"
+    "If content is insufficient, output exactly: Not enough content to summarize.\n"
 )
+
 SHORT_TRANSCRIPT_SUMMARY = (
     "Summary:\n"
     "Not enough content to summarize.\n\n"
@@ -110,6 +136,35 @@ FINAL_IMPORTANCE_HINTS = (
     "compliance",
     "incident",
 )
+INCOMPLETE_TRAILING_WORD_RE = re.compile(
+    r"\b(?:the|a|an|to|of|for|with|and|or|but|is|are|was|were|at|in|on|by|from|that|this|these|those|it|its|their|his|her)\s*$",
+    re.IGNORECASE,
+)
+
+
+def is_incomplete_summary_output(text: str) -> bool:
+    raw = (text or "").strip()
+    if not raw:
+        return True
+    lowered = raw.lower()
+    if "summary:" not in lowered:
+        return True
+    if "action items:" not in lowered:
+        return True
+    summary_part, _, _action_part = raw.partition("Action Items:")
+    if not summary_part:
+        return True
+    summary_body = re.sub(r"(?is)^.*?\bSummary:\s*", "", summary_part).strip()
+    if not summary_body:
+        return True
+    words = summary_body.split()
+    if len(words) < 10:
+        return True
+    if INCOMPLETE_TRAILING_WORD_RE.search(summary_body):
+        return True
+    if summary_body[-1] not in ".!?":
+        return True
+    return False
 
 def split_into_chunks(text: str, max_words: int) -> List[str]:
     """Split *text* into a list of strings each containing up to *max_words* words.
@@ -293,19 +348,22 @@ def summarize_with_llm(
                         on_delta(chunk_text)
                         continue
                     if chunk_text.startswith(collected):
+                        # Provider returned cumulative text so far.
                         delta = chunk_text[len(collected) :]
                         collected = chunk_text
-                    elif chunk_text in collected:
+                    elif len(chunk_text) > 16 and collected.startswith(chunk_text):
+                        # Provider re-sent a prefix; nothing new.
                         delta = ""
                     else:
+                        # Default to token-delta mode with suffix/prefix overlap handling.
                         max_overlap = 0
                         max_len = min(len(collected), len(chunk_text))
-                        for i in range(1, max_len + 1):
+                        for i in range(max_len, 0, -1):
                             if collected[-i:] == chunk_text[:i]:
                                 max_overlap = i
+                                break
                         delta = chunk_text[max_overlap:]
-                        if delta:
-                            collected += delta
+                        collected += delta
                     if delta:
                         on_delta(delta)
                 return collected.strip()
@@ -356,7 +414,7 @@ def summarize_direct(
 ) -> str:
     if on_progress:
         on_progress("summarizing transcript")
-    return summarize_with_llm(client, text, DEFAULT_PROMPT, max_tokens=640, on_delta=on_stream)
+    return summarize_with_llm(client, text, DEFAULT_PROMPT, max_tokens=260, on_delta=on_stream)
 
 
 def create_llama(model_path: str, n_ctx: int) -> Llama:
@@ -417,7 +475,10 @@ class SummarizerDaemon:
                         meta_lines.append(line)
             if meta_lines:
                 meta_prefix = "\n".join(meta_lines) + "\n\n"
-            combined_text = meta_prefix + text
+            normalized_text = normalize_transcript_for_summary(text)
+            if not normalized_text:
+                normalized_text = text
+            combined_text = meta_prefix + normalized_text
             word_count = count_words(combined_text)
 
             if word_count < self.min_words:
@@ -464,7 +525,7 @@ class SummarizerDaemon:
                 self.send({"event": "done", "out": out_path, "text": summary, "secs": dur, "context": context})
                 return
             final_input_text = combined_text
-            chunks = [chunk.strip() for chunk in split_into_chunks(text, chunk_threshold) if chunk.strip()]
+            chunks = [chunk.strip() for chunk in split_into_chunks(normalized_text, chunk_threshold) if chunk.strip()]
             if len(chunks) > 1:
                 chunk_summaries = []
                 for idx, chunk_text in enumerate(chunks, start=1):
@@ -510,7 +571,6 @@ class SummarizerDaemon:
             except Exception as e:
                 self.send({"event": "error", "msg": f"summarization error: {e}", "out": out_path, "context": context})
                 return
-            summary = finalize_action_items_output(summary, text)
             dur = time.time() - start
             if out_path:
                 try:
