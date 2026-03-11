@@ -46,9 +46,11 @@ class StreamingDeltaClient:
 
 class SummarizerDaemonTests(unittest.TestCase):
     def test_prompts_forbid_invented_roles_and_generic_admin_tasks(self):
-        self.assertIn("Do not invent facts, names, organizations, job titles, or speaker roles.", DEFAULT_PROMPT)
-        self.assertIn("Do not create generic admin tasks", DEFAULT_PROMPT)
-        self.assertIn("Do not invent facts, names, organizations, job titles, or speaker roles.", CHUNK_SUMMARY_PROMPT)
+        self.assertIn("You are a meeting notes summarizer.", DEFAULT_PROMPT)
+        self.assertIn("Do not invent facts, names, roles, or action items.", DEFAULT_PROMPT)
+        self.assertIn("Action Items:", DEFAULT_PROMPT)
+        self.assertIn("You are a meeting notes summarizer.", CHUNK_SUMMARY_PROMPT)
+        self.assertIn("Do not invent facts, names, roles, or action items.", CHUNK_SUMMARY_PROMPT)
 
     def test_summarize_with_llm_retries_with_smaller_max_tokens_on_context_overflow(self):
         client = OverflowRetryClient()
@@ -109,6 +111,37 @@ class SummarizerDaemonTests(unittest.TestCase):
 
         self.assertTrue(client.calls)
         self.assertIn(CHUNK_SUMMARY_PROMPT.strip(), client.calls[0]["prompt"])
+
+    def test_short_final_transcript_uses_single_full_context_summary(self):
+        client = StaticClient(
+            "Summary:\n"
+            "The advisor and student reviewed a schedule change caused by an unfinished avionics course.\n\n"
+            "Action Items:\n"
+            "- Student: email JR Riggs to confirm the wait list."
+        )
+        daemon = SummarizerDaemon.__new__(SummarizerDaemon)
+        daemon.model_path = "mock://summary"
+        daemon.n_ctx = 2048
+        daemon.min_words = 1
+        daemon.client = client
+        daemon.lock = threading.Lock()
+        daemon.send = lambda _obj: None  # type: ignore[assignment]
+
+        transcript = (
+            "The student needs to drop meteorology to add modern avionics. "
+            "Modern avionics conflicts with chapel, but it can be taken in a different semester. "
+            "The advisor asked the student to email JR Riggs to confirm the Flight 117 wait list."
+        )
+        daemon.summarize(
+            transcript,
+            out_path=None,
+            chunk_words=50,
+            context={"type": "final", "sessionDir": "mock/session"},
+        )
+
+        self.assertEqual(len(client.calls), 1)
+        self.assertIn(DEFAULT_PROMPT.strip(), client.calls[0]["prompt"])
+        self.assertNotIn(CHUNK_SUMMARY_PROMPT.strip(), client.calls[0]["prompt"])
 
     def test_streaming_delta_chunks_do_not_drop_repeated_tokens(self):
         client = StreamingDeltaClient(["the student reviewed ", "the ", "schedule and ", "the timeline."])

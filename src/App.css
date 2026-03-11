@@ -219,6 +219,68 @@
   font-style: italic;
 }
 
+.summary-progress {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-height: 148px;
+}
+
+.summary-progress__hint {
+  color: #c8c8c8;
+  line-height: 1.45;
+}
+
+.summary-progress__steps {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.summary-progress__step {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 10px 12px;
+  border: 1px solid #262626;
+  border-radius: 8px;
+  background: #121212;
+}
+
+.summary-progress__step--active {
+  border-color: #3f5f87;
+  background: linear-gradient(180deg, rgba(25, 39, 58, 0.7), rgba(18, 18, 18, 0.95));
+}
+
+.summary-progress__dot {
+  width: 10px;
+  height: 10px;
+  margin-top: 4px;
+  border-radius: 999px;
+  background: #6d6d6d;
+  flex: 0 0 auto;
+}
+
+.summary-progress__step--active .summary-progress__dot {
+  background: #8fc1ff;
+  box-shadow: 0 0 0 4px rgba(143, 193, 255, 0.14);
+}
+
+.summary-progress__content {
+  min-width: 0;
+}
+
+.summary-progress__label {
+  font-weight: 600;
+  color: #f3f3f3;
+}
+
+.summary-progress__detail {
+  margin-top: 2px;
+  color: #b5b5b5;
+  font-size: 0.92rem;
+}
+
 .path-label {
   overflow-wrap: anywhere;
   word-break: break-word;

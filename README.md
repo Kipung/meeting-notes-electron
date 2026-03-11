@@ -273,7 +273,7 @@ The bundled `setup.py` helper now reads its configuration from environment varia
 ## Summarization model
 
 The app preloads a llama-cpp model via `backend/summarizer_daemon.py`.
-It prefers a model in `app.getPath('userData')/models` (or `models/` in dev), picking `Llama-3.2-3B-Instruct-Q4_K_M.gguf` if present, otherwise the first `.gguf` it finds.
+It prefers a model in `app.getPath('userData')/models` (or `models/` in dev), picking `qwen2.5-3b-instruct-q4_k_m.gguf` first when present, then falling back to other bundled `.gguf` files.
 Override with an env var:
 
 ```bash
@@ -360,7 +360,7 @@ Before building the installer, populate these folders at the project root:
 
 ```
 python/   # runtime with bin/python3 (mac) or python.exe (windows)
-models/   # GGUF model(s), e.g. Llama-3.2-3B-Instruct-Q4_K_M.gguf
+models/   # GGUF model(s), e.g. qwen2.5-3b-instruct-q4_k_m.gguf
 whisper/  # Whisper model(s), e.g. small.en.pt
 ffmpeg/   # ffmpeg binary, e.g. ffmpeg or ffmpeg.exe
 lib/      # ffmpeg .dylib files for macOS

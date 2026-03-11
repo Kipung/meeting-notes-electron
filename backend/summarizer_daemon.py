@@ -3,23 +3,49 @@ from __future__ import annotations
 import json
 import os
 import re
+import subprocess
 import sys
 import threading
 import time
+import importlib
 from typing import Callable, List, Optional
 
 try:
-    from .summary_formatting import split_sentences
+    from .summary_formatting import finalize_summary_output_model_first, split_sentences
 except ImportError:
-    from summary_formatting import split_sentences
+    from summary_formatting import finalize_summary_output_model_first, split_sentences
 
 try:
     from llama_cpp import Llama
 except Exception as e:
+    Llama = None  # type: ignore[assignment]
     print(json.dumps({"event": "error", "msg": f"failed to import llama_cpp: {e}"}))
     # Do not exit; allow the daemon to run without Llama for testing purposes
     # sys.exit(1)
 
+try:
+    from transformers import AutoModelForSeq2SeqLM, AutoTokenizer
+except Exception:
+    AutoModelForSeq2SeqLM = None  # type: ignore[assignment]
+    AutoTokenizer = None  # type: ignore[assignment]
+
+try:
+    import torch
+except Exception:
+    torch = None  # type: ignore[assignment]
+
+SEQ2SEQ_DEPENDENCIES = ("transformers==4.49.0", "sentencepiece==0.2.1")
+
+
+def bool_from_env(name: str, default: bool) -> bool:
+    raw = os.getenv(name, "").strip().lower()
+    if not raw:
+        return default
+    if raw in {"1", "true", "yes", "on"}:
+        return True
+    if raw in {"0", "false", "no", "off"}:
+        return False
+    return default
 
 
 def count_words(text: str) -> int:
@@ -75,34 +101,39 @@ def max_tokens_from_env(default: int) -> int:
     return default
 
 
-DEFAULT_PROMPT = (
-    "You are an assistant that summarizes meeting transcripts.\n"
-    "Use only the provided transcript.\n"
-    "Do not invent facts, names, organizations, job titles, or speaker roles.\n"
-    "If a role/title is not explicitly stated in the transcript, keep references generic (for example: Speaker 1, Speaker 2, participant, student, coach).\n"
+SUMMARY_OUTPUT_FORMAT = (
     "Return exactly two sections in this order:\n"
     "Summary:\n"
     "Action Items:\n"
-    "Summary must be 3-5 sentences, maximum 180 words, with no repeated sentence or clause.\n"
-    "Include key decisions, blockers, and deadlines when present.\n"
-    "Action Items must include only explicit follow-up tasks from the transcript, up to 5 bullets.\n"
-    "Do not create generic admin tasks (for example: send follow-up email, schedule a meeting, notify leadership) unless explicitly stated in the transcript.\n"
-    "Each bullet must be concise and actionable.\n"
-    "If no explicit tasks exist, write exactly: Action Items: none.\n"
-    "Do not output any extra headings (for example: Meeting Notes, Notes, High Importance).\n"
+    "Write the Summary as one short paragraph of 3-5 sentences, maximum 220 words.\n"
+    "End with Action Items as bullet points.\n"
+    "If there are no explicit follow-up tasks in the transcript, write exactly: Action Items: none.\n"
+)
+
+DEFAULT_PROMPT = (
+    "You are a meeting notes summarizer.\n"
+    "Read the transcript and summarize the main point of the meeting.\n"
+    "Explain the core situation, the key decisions or outcomes, and any concrete follow-up that was actually discussed.\n"
+    "Highlight the most important takeaways, blockers, and deadlines when they are clearly present.\n"
+    "If the transcript includes uncertainty or competing options, reflect that instead of forcing certainty.\n"
+    "If the meeting explores multiple options, summarize the final outcome rather than the first idea mentioned.\n"
+    "Use only information stated in the transcript.\n"
+    "Do not invent facts, names, roles, or action items.\n"
+    "Keep the wording natural, specific, and concise.\n"
+    + SUMMARY_OUTPUT_FORMAT
 )
 
 
 
-DEFAULT_CHUNK_WORDS = int(os.getenv("SUM_CHUNK_WORDS", "200"))
+DEFAULT_CHUNK_WORDS = int(os.getenv("SUM_CHUNK_WORDS", "900"))
+DEFAULT_SEQ2SEQ_CHUNK_WORDS = int(os.getenv("SUM_SEQ2SEQ_CHUNK_WORDS", "120"))
 CHUNK_SUMMARY_PROMPT = (
-    "You are an assistant that summarizes one chunk of a meeting transcript.\n"
+    "You are a meeting notes summarizer.\n"
     "Use only the provided text.\n"
-    "Do not invent facts, names, organizations, job titles, or speaker roles.\n"
-    "If a role/title is not explicitly stated, keep references generic (for example: Speaker 1, Speaker 2, participant).\n"
-    "Write exactly one paragraph of 2-3 sentences, maximum 70 words.\n"
-    "Cover only key facts/decisions/blockers in this chunk.\n"
-    "Do not repeat phrases or sentences.\n"
+    "Do not invent facts, names, roles, or action items.\n"
+    "Write exactly one short paragraph of 3-4 sentences, maximum 120 words.\n"
+    "Keep concrete details that will matter in a final summary, including decisions, blockers, schedule conflicts, and explicit follow-up.\n"
+    "If the chunk contains a correction or revised plan, keep the latest outcome.\n"
     "Do not include headings, bullets, or an Action Items section.\n"
     "If content is insufficient, output exactly: Not enough content to summarize.\n"
 )
@@ -118,7 +149,7 @@ CONTEXT_OVERFLOW_PATTERNS = (
     "context window",
 )
 FINAL_AGGREGATE_MAX_WORDS = int(os.getenv("SUM_FINAL_AGG_MAX_WORDS", "900"))
-FINAL_AGGREGATE_PER_CHUNK_MAX_WORDS = int(os.getenv("SUM_FINAL_CHUNK_MAX_WORDS", "60"))
+FINAL_AGGREGATE_PER_CHUNK_MAX_WORDS = int(os.getenv("SUM_FINAL_CHUNK_MAX_WORDS", "90"))
 FINAL_IMPORTANCE_HINTS = (
     "critical",
     "urgent",
@@ -136,6 +167,9 @@ FINAL_IMPORTANCE_HINTS = (
     "compliance",
     "incident",
 )
+PREPARED_FINAL_INPUT_MARKERS = ("previous chunk summaries:", "remaining transcript:")
+DIRECT_SUMMARY_TOKEN_MARGIN = int(os.getenv("SUM_DIRECT_TOKEN_MARGIN", "280"))
+DIRECT_SUMMARY_WORDS_PER_TOKEN = 0.78
 INCOMPLETE_TRAILING_WORD_RE = re.compile(
     r"\b(?:the|a|an|to|of|for|with|and|or|but|is|are|was|were|at|in|on|by|from|that|this|these|those|it|its|their|his|her)\s*$",
     re.IGNORECASE,
@@ -176,6 +210,20 @@ def split_into_chunks(text: str, max_words: int) -> List[str]:
         chunk_words = words[i : i + max_words]
         chunks.append(" ".join(chunk_words))
     return chunks
+
+
+def is_prepared_final_input(text: str, context_type: Optional[str]) -> bool:
+    if context_type != "final":
+        return False
+    lowered = (text or "").lower()
+    return any(marker in lowered for marker in PREPARED_FINAL_INPUT_MARKERS)
+
+
+def estimate_direct_summary_word_limit(n_ctx: int, max_tokens: int) -> int:
+    if n_ctx <= 0:
+        return 0
+    available_prompt_tokens = max(n_ctx - max_tokens - DIRECT_SUMMARY_TOKEN_MARGIN, 0)
+    return max(0, int(available_prompt_tokens * DIRECT_SUMMARY_WORDS_PER_TOKEN))
 
 FOLLOWUP_PROMPT = (
     "You are an assistant that drafts a warm, professional follow-up email after a student support session.\n"
@@ -303,13 +351,23 @@ def compress_chunk_summaries_for_final(
 
 
 def summarize_with_llm(
-    client: Llama,
+    client,
     text: str,
     prompt: str,
     max_tokens: int = 1024,
     on_delta: Optional[Callable[[str], None]] = None,
+    task: str = "final",
 ) -> str:
     full_prompt = prompt + "\n\nTranscript:\n" + text + "\n\nSummary:\n"
+    model_input = full_prompt
+    if hasattr(client, "build_input"):
+        model_input = client.build_input(text=text, prompt=prompt, task=task)
+
+    if hasattr(client, "generate_text"):
+        generated = client.generate_text(model_input, max_tokens=max_tokens, temperature=0.2)
+        if on_delta and generated:
+            on_delta(generated)
+        return generated.strip()
 
     def run_completion(current_max_tokens: int, stream: bool):
         if hasattr(client, "create_completion"):
@@ -383,7 +441,7 @@ def summarize_with_llm(
 
 
 def generate_followup_email(
-    client: Llama,
+    client,
     summary: str,
     instructions: str,
     max_tokens: int,
@@ -396,6 +454,8 @@ def generate_followup_email(
     if instructions:
         prompt += "\nAdditional instructions:\n" + instructions.strip() + "\n"
     full_prompt = prompt + "\nSummary:\n" + summary + "\n\nEmail:\n"
+    if hasattr(client, "generate_text"):
+        return clean_followup_email(client.generate_text(full_prompt, max_tokens=max_tokens, temperature=temperature))
     if hasattr(client, "create_completion"):
         resp = client.create_completion(prompt=full_prompt, max_tokens=max_tokens, temperature=temperature)
     elif hasattr(client, "create"):
@@ -407,21 +467,125 @@ def generate_followup_email(
 
 
 def summarize_direct(
-    client: Llama,
+    client,
     text: str,
+    max_tokens: int = 260,
+    task: str = "final",
     on_progress: Optional[Callable[[str], None]] = None,
     on_stream: Optional[Callable[[str], None]] = None,
 ) -> str:
     if on_progress:
         on_progress("summarizing transcript")
-    return summarize_with_llm(client, text, DEFAULT_PROMPT, max_tokens=260, on_delta=on_stream)
+    return summarize_with_llm(client, text, DEFAULT_PROMPT, max_tokens=max_tokens, on_delta=on_stream, task=task)
 
 
-def create_llama(model_path: str, n_ctx: int) -> Llama:
+class Seq2SeqClient:
+    def __init__(self, model_path: str, n_ctx: int):
+        self.is_seq2seq = True
+        self._ensure_seq2seq_dependencies()
+        if AutoTokenizer is None or AutoModelForSeq2SeqLM is None:
+            raise RuntimeError(
+                "transformers is required for seq2seq summarization models; "
+                f"install with `{sys.executable} -m pip install {' '.join(SEQ2SEQ_DEPENDENCIES)}`"
+            )
+        self.tokenizer = AutoTokenizer.from_pretrained(model_path)
+        self.model = AutoModelForSeq2SeqLM.from_pretrained(model_path)
+        self.max_input_tokens = self._resolve_max_input_tokens(n_ctx)
+        raw_prefix = os.getenv("SEQ2SEQ_SUMMARY_PREFIX", "summarize:")
+        self.summary_prefix = raw_prefix.strip() if raw_prefix.strip() else "summarize:"
+        approx_from_ctx = int(self.max_input_tokens * 0.5)
+        self.preferred_chunk_words = max(60, min(DEFAULT_SEQ2SEQ_CHUNK_WORDS, approx_from_ctx))
+
+    def _ensure_seq2seq_dependencies(self) -> None:
+        global AutoTokenizer, AutoModelForSeq2SeqLM
+        if AutoTokenizer is not None and AutoModelForSeq2SeqLM is not None:
+            return
+        auto_install = os.getenv("SEQ2SEQ_AUTO_INSTALL", "1").strip().lower() not in {"0", "false", "no"}
+        if not auto_install:
+            return
+        try:
+            subprocess.check_call(
+                [sys.executable, "-m", "pip", "install", "--no-cache-dir", *SEQ2SEQ_DEPENDENCIES],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            transformers_mod = importlib.import_module("transformers")
+            AutoTokenizer = getattr(transformers_mod, "AutoTokenizer", None)
+            AutoModelForSeq2SeqLM = getattr(transformers_mod, "AutoModelForSeq2SeqLM", None)
+        except Exception:
+            # Keep the detailed guidance from the caller-facing RuntimeError.
+            pass
+
+    def _resolve_max_input_tokens(self, n_ctx: int) -> int:
+        raw = getattr(self.tokenizer, "model_max_length", 512)
+        if not isinstance(raw, int) or raw <= 0 or raw > 100_000:
+            raw = 512
+        if n_ctx > 0:
+            raw = min(raw, n_ctx)
+        return max(64, raw)
+
+    def build_input(self, text: str, prompt: str, task: str = "final") -> str:
+        cleaned = re.sub(r"\s+", " ", (text or "")).strip()
+        if not cleaned:
+            cleaned = "Not enough content to summarize."
+        # Seq2seq summarization checkpoints perform better with concise task-prefix inputs.
+        return f"{self.summary_prefix} {cleaned}"
+
+    def generate_text(self, prompt: str, max_tokens: int, temperature: float = 0.2) -> str:
+        inputs = self.tokenizer(
+            prompt,
+            return_tensors="pt",
+            truncation=True,
+            max_length=self.max_input_tokens,
+        )
+        max_new_tokens = max(32, int(max_tokens))
+        do_sample = temperature > 0.05
+        generate_kwargs = {
+            "max_new_tokens": max_new_tokens,
+            "do_sample": do_sample,
+        }
+        if do_sample:
+            generate_kwargs["temperature"] = max(temperature, 0.05)
+        if torch is not None:
+            with torch.no_grad():
+                out = self.model.generate(**inputs, **generate_kwargs)
+        else:
+            out = self.model.generate(**inputs, **generate_kwargs)
+        return self.tokenizer.decode(out[0], skip_special_tokens=True).strip()
+
+
+def is_seq2seq_model_dir(model_path: str) -> bool:
+    if not os.path.isdir(model_path):
+        return False
+    config_path = os.path.join(model_path, "config.json")
+    if not os.path.isfile(config_path):
+        return False
+    has_weights = os.path.isfile(os.path.join(model_path, "pytorch_model.bin")) or os.path.isfile(
+        os.path.join(model_path, "model.safetensors")
+    )
+    if not has_weights:
+        return False
+    try:
+        with open(config_path, "r", encoding="utf-8") as fh:
+            config = json.load(fh)
+        return bool(config.get("is_encoder_decoder"))
+    except Exception:
+        return False
+
+
+def create_llama(model_path: str, n_ctx: int):
+    if Llama is None:
+        raise RuntimeError("llama_cpp is not available in this Python environment")
     try:
         return Llama(model_path=model_path, n_ctx=n_ctx)
     except TypeError:
         return Llama(model_path=model_path)
+
+
+def create_model_client(model_path: str, n_ctx: int):
+    if is_seq2seq_model_dir(model_path):
+        return Seq2SeqClient(model_path=model_path, n_ctx=n_ctx)
+    return create_llama(model_path=model_path, n_ctx=n_ctx)
 
 
 class SummarizerDaemon:
@@ -440,7 +604,7 @@ class SummarizerDaemon:
         with self.lock:
             try:
                 self.send({"event": "progress", "msg": f"loading model {model_path} (n_ctx={self.n_ctx})"})
-                self.client = create_llama(model_path, self.n_ctx)
+                self.client = create_model_client(model_path, self.n_ctx)
                 self.model_path = model_path
                 self.send({"event": "loaded", "model": model_path})
             except Exception as e:
@@ -475,10 +639,22 @@ class SummarizerDaemon:
                         meta_lines.append(line)
             if meta_lines:
                 meta_prefix = "\n".join(meta_lines) + "\n\n"
-            normalized_text = normalize_transcript_for_summary(text)
+            context_type = context.get("type") if context else None
+            raw_source_transcript = ""
+            if context and isinstance(context.get("sourceTranscript"), str):
+                raw_source_transcript = context.get("sourceTranscript", "")
+
+            use_prepared_final_input = is_prepared_final_input(text, context_type)
+            if use_prepared_final_input:
+                normalized_text = (text or "").strip()
+            else:
+                normalized_text = normalize_transcript_for_summary(text)
             if not normalized_text:
                 normalized_text = text
             combined_text = meta_prefix + normalized_text
+            grounding_text = normalize_transcript_for_summary(raw_source_transcript) if raw_source_transcript else normalized_text
+            if not grounding_text:
+                grounding_text = normalized_text
             word_count = count_words(combined_text)
 
             if word_count < self.min_words:
@@ -496,8 +672,14 @@ class SummarizerDaemon:
                 self.send({"event": "done", "out": out_path, "text": summary, "secs": 0, "context": context})
                 return
             start = time.time()
-            chunk_threshold = chunk_words if isinstance(chunk_words, int) and chunk_words > 0 else DEFAULT_CHUNK_WORDS
-            context_type = context.get("type") if context else None
+            is_seq2seq = bool(getattr(self.client, "is_seq2seq", False))
+            default_chunk_words = DEFAULT_SEQ2SEQ_CHUNK_WORDS if is_seq2seq else DEFAULT_CHUNK_WORDS
+            chunk_threshold = chunk_words if isinstance(chunk_words, int) and chunk_words > 0 else default_chunk_words
+            if is_seq2seq:
+                preferred_chunk_words = int(getattr(self.client, "preferred_chunk_words", DEFAULT_SEQ2SEQ_CHUNK_WORDS))
+                chunk_threshold = max(40, min(chunk_threshold, preferred_chunk_words))
+            chunk_max_tokens = 160 if is_seq2seq else 256
+            final_max_tokens = 220 if is_seq2seq else 320
             is_chunk_request = context_type == "chunk"
             if is_chunk_request:
                 try:
@@ -505,7 +687,8 @@ class SummarizerDaemon:
                         self.client,
                         combined_text,
                         CHUNK_SUMMARY_PROMPT,
-                        max_tokens=256,
+                        max_tokens=chunk_max_tokens,
+                        task="chunk",
                     )
                 except Exception as e:
                     self.send({"event": "error", "msg": f"summarization error: {e}", "out": out_path, "context": context})
@@ -525,8 +708,15 @@ class SummarizerDaemon:
                 self.send({"event": "done", "out": out_path, "text": summary, "secs": dur, "context": context})
                 return
             final_input_text = combined_text
-            chunks = [chunk.strip() for chunk in split_into_chunks(normalized_text, chunk_threshold) if chunk.strip()]
-            if len(chunks) > 1:
+            should_skip_backend_chunking = use_prepared_final_input
+            if not should_skip_backend_chunking and not is_seq2seq:
+                direct_word_limit = estimate_direct_summary_word_limit(self.n_ctx, final_max_tokens)
+                should_skip_backend_chunking = word_count <= max(chunk_threshold, direct_word_limit)
+            if not should_skip_backend_chunking:
+                chunks = [chunk.strip() for chunk in split_into_chunks(normalized_text, chunk_threshold) if chunk.strip()]
+            else:
+                chunks = [normalized_text]
+            if not should_skip_backend_chunking and len(chunks) > 1:
                 chunk_summaries = []
                 for idx, chunk_text in enumerate(chunks, start=1):
                     self.send({"event": "progress", "msg": f"summarizing chunk {idx}/{len(chunks)}", "context": context})
@@ -535,7 +725,8 @@ class SummarizerDaemon:
                             self.client,
                             chunk_text,
                             CHUNK_SUMMARY_PROMPT,
-                            max_tokens=256,
+                            max_tokens=chunk_max_tokens,
+                            task="chunk",
                         )
                     except Exception as e:
                         self.send({"event": "progress", "msg": f"chunk {idx} summary failed: {e}", "context": context})
@@ -556,21 +747,29 @@ class SummarizerDaemon:
                                 "context": context,
                             }
                         )
-                    aggregated = "\n\n".join(
-                        f"Chunk {i + 1} summary:\n{chunk_summary}"
-                        for i, chunk_summary in enumerate(reduced_chunk_summaries)
-                    )
+                    if is_seq2seq:
+                        aggregated = " ".join(reduced_chunk_summaries).strip()
+                    else:
+                        aggregated = "\n\n".join(
+                            f"Chunk {i + 1} summary:\n{chunk_summary}"
+                            for i, chunk_summary in enumerate(reduced_chunk_summaries)
+                        )
                     final_input_text = meta_prefix + aggregated
             try:
                 summary = summarize_direct(
                     self.client,
                     final_input_text,
+                    max_tokens=final_max_tokens,
+                    task="final",
                     on_progress=lambda msg: self.send({"event": "progress", "msg": msg, "context": context}),
                     on_stream=lambda delta: self.send({"event": "summary_delta", "text": delta, "out": out_path, "context": context}),
                 )
             except Exception as e:
                 self.send({"event": "error", "msg": f"summarization error: {e}", "out": out_path, "context": context})
                 return
+            if bool_from_env("SUM_STRICT_FORMAT", True):
+                summary_for_formatting = summary if "Summary:" in summary else f"Summary:\n{summary}"
+                summary = finalize_summary_output_model_first(summary_for_formatting, grounding_text)
             dur = time.time() - start
             if out_path:
                 try:

@@ -21,9 +21,9 @@ const STEP_LABELS: Record<StepState, string> = {
   error: 'error',
 }
 const HEADING_PREFIX_RE = /^[-*#>\s]+/
-const SUMMARY_HEADING_LINE_RE = /^summary(?:\s*[:\-]|$)/i
-const ACTION_HEADING_LINE_RE = /^action items?(?:\s*[:\-]|$)/i
-const HIGH_IMPORTANCE_HEADING_LINE_RE = /^high importance(?:\s*[:\-]|$)/i
+const SUMMARY_HEADING_LINE_RE = /^summary(?:\s*[:-]|$)/i
+const ACTION_HEADING_LINE_RE = /^action items?(?:\s*[:-]|$)/i
+const HIGH_IMPORTANCE_HEADING_LINE_RE = /^high importance(?:\s*[:-]|$)/i
 const LEADING_BULLET_RE = /^\s*(?:[-*•]|\d+[.)])\s*/
 const ACTION_NONE_RE = /^(?:none|none\.|no action items?\.?|no actionable follow-?up(?: tasks?)?\.?)$/i
 const ACTION_PLACEHOLDER_RE = /\b(?:owner|topic|due date|tbd)\b/i
@@ -38,6 +38,12 @@ type ParsedSummaryView = {
   actionItems: string[]
   actionItemsNone: boolean
   hasActionSection: boolean
+}
+
+type SummaryProgressStep = {
+  key: string
+  label: string
+  detail?: string
 }
 
 const cleanLine = (value: string) => value.trim().replace(/\s+/g, ' ')
@@ -220,6 +226,45 @@ const parseSummaryForView = (rawSummary: string): ParsedSummaryView => {
   }
 }
 
+const toSummaryProgressStep = (message: string): SummaryProgressStep => {
+  const cleaned = cleanLine(message) || 'Summarizing transcript'
+  const chunkMatch = /summarizing chunk (\d+)\/(\d+)/i.exec(cleaned)
+  if (chunkMatch) {
+    return {
+      key: 'chunk-pass',
+      label: 'Analyzing transcript segments',
+      detail: `Chunk ${chunkMatch[1]} of ${chunkMatch[2]}`,
+    }
+  }
+  const compressMatch = /compressing aggregated chunk summaries\s*\((\d+)\s*->\s*(\d+)\)/i.exec(cleaned)
+  if (compressMatch) {
+    return {
+      key: 'compress-pass',
+      label: 'Condensing chunk notes',
+      detail: `${compressMatch[1]} chunks reduced to ${compressMatch[2]}`,
+    }
+  }
+  if (/loading model/i.test(cleaned)) {
+    return { key: 'load-model', label: 'Loading summary model' }
+  }
+  if (/starting summarization/i.test(cleaned)) {
+    return { key: 'start', label: 'Starting summarization' }
+  }
+  if (/summarizing transcript/i.test(cleaned)) {
+    return { key: 'final-pass', label: 'Writing final summary' }
+  }
+  return {
+    key: cleaned.toLowerCase(),
+    label: cleaned.charAt(0).toUpperCase() + cleaned.slice(1),
+  }
+}
+
+const upsertSummaryProgressStep = (steps: SummaryProgressStep[], nextStep: SummaryProgressStep) => {
+  const index = steps.findIndex((step) => step.key === nextStep.key)
+  if (index === -1) return [...steps, nextStep]
+  return steps.map((step, idx) => (idx === index ? nextStep : step))
+}
+
 function App() {
   const [devices, setDevices] = useState<BackendDevice[]>([])
   const [loopbackDevices, setLoopbackDevices] = useState<BackendDevice[]>([])
@@ -258,6 +303,8 @@ function App() {
   const [processingTranscriptFile, setProcessingTranscriptFile] = useState(false)
   const [summarizingTranscriptText, setSummarizingTranscriptText] = useState(false)
   const [dropActive, setDropActive] = useState(false)
+  const [summaryProgressSteps, setSummaryProgressSteps] = useState<SummaryProgressStep[]>([])
+  const [summaryProgressMessage, setSummaryProgressMessage] = useState('')
   const isWindows = /Windows/.test(navigator.userAgent)
 
   const getElapsedSeconds = () => {
@@ -338,22 +385,11 @@ function App() {
       setSummarizationState('done')
       const text = data.text || ''
       setSummary(text)
+      setSummaryProgressMessage('')
+      setSummaryProgressSteps([])
       setFollowUpEmail('')
       setFollowUpStatus('')
       setFollowUpGenerating(false)
-    })
-
-    const offSummaryStream = backend.onSummaryStream((_ev, data) => {
-      if (!data) return
-      if (data.reset) {
-        setSummary('')
-        setFollowUpEmail('')
-        setFollowUpStatus('')
-        setFollowUpGenerating(false)
-        return
-      }
-      const delta = typeof data.delta === 'string' ? data.delta : ''
-      if (delta) setSummary((prev) => prev + delta)
     })
 
     const offSummaryStatus = backend.onSummaryStatus((_ev, data) => {
@@ -362,7 +398,15 @@ function App() {
       if (state === 'running') setStatus('summarizing')
       if (state === 'done') setStatus('summary-ready')
       if (state === 'error') setStatus('summary-error')
-      setStatusDetail(data.message || '')
+      const message = data.message || ''
+      setStatusDetail(message)
+      setSummaryProgressMessage(message)
+      if (state === 'running') {
+        setSummaryProgressSteps((prev) => upsertSummaryProgressStep(prev, toSummaryProgressStep(message)))
+      }
+      if (state === 'error' && message) {
+        setSummaryProgressSteps((prev) => upsertSummaryProgressStep(prev, { key: 'summary-error', label: 'Summary failed', detail: message }))
+      }
     })
 
     const offBootstrapStatus = backend.onBootstrapStatus((_ev, data) => {
@@ -379,7 +423,6 @@ function App() {
       offRecordingReady()
       offRecordingStarted()
       offSummary()
-      offSummaryStream()
       offSummaryStatus()
       offBootstrapStatus()
     }
@@ -428,6 +471,8 @@ function App() {
   const onStart = () => {
     setTranscript('')
     setSummary('')
+    setSummaryProgressMessage('')
+    setSummaryProgressSteps([])
     setFollowUpEmail('')
     setFollowUpStatus('')
     setFollowUpGenerating(false)
@@ -496,6 +541,9 @@ function App() {
   const onProcessRecordingFile = async () => {
     if (processingRecordingFile || processingTranscriptFile || summarizingTranscriptText) return
     setProcessingRecordingFile(true)
+    setSummary('')
+    setSummaryProgressMessage('')
+    setSummaryProgressSteps([])
     setStatus('transcribing')
     setStatusDetail('processing uploaded audio...')
     try {
@@ -521,6 +569,9 @@ function App() {
   const onProcessTranscriptFile = async () => {
     if (processingRecordingFile || processingTranscriptFile || summarizingTranscriptText) return
     setProcessingTranscriptFile(true)
+    setSummary('')
+    setSummaryProgressMessage('')
+    setSummaryProgressSteps([])
     setStatus('transcribing')
     setStatusDetail('processing uploaded transcript...')
     try {
@@ -552,6 +603,11 @@ function App() {
     }
     if (processingRecordingFile || processingTranscriptFile || summarizingTranscriptText) return
     setSummarizingTranscriptText(true)
+    setSummary('')
+    setSummaryProgressMessage('')
+    setSummaryProgressSteps([
+      { key: 'start', label: 'Starting summarization' },
+    ])
     setStatus('summarizing')
     setStatusDetail('summarizing current transcript text...')
     setSummarizationState('running')
@@ -599,6 +655,9 @@ function App() {
     }
     setStatus('transcribing')
     setStatusDetail('processing dropped file...')
+    setSummary('')
+    setSummaryProgressMessage('')
+    setSummaryProgressSteps([])
     setProcessingTranscriptFile(true)
     try {
       const res = await backend.processInputPath(droppedPath)
@@ -621,6 +680,12 @@ function App() {
   const canDeleteAudio = Boolean(sessionDir) && transcriptionState === 'done' && recordingState !== 'running' && recordingState !== 'paused'
   const followUpActionLabel = followUpGenerating ? 'Generating...' : followUpEmail ? 'Regenerate from summary' : 'Generate from summary'
   const parsedSummary = useMemo(() => parseSummaryForView(summary), [summary])
+  const showSummaryProgress = summarizationState === 'running' && !summary
+  const showSummaryError = summarizationState === 'error' && !summary
+  const summaryProgressHint =
+    summaryProgressMessage && !/summary complete/i.test(summaryProgressMessage)
+      ? summaryProgressMessage
+      : 'Chunking and cleanup run in the background. The final summary appears when it is ready.'
   const effectiveSummaryText = parsedSummary.summaryText || extractSummaryFallbackText(summary)
   const summaryDateText = useMemo(
     () =>
@@ -1017,24 +1082,51 @@ function App() {
               <div className="summary-display__meta-line">{summaryHeaderLine}</div>
               <div className="summary-display__meta-subline">{summaryHeaderSubline}</div>
             </div>
-            <>
-              <div className="summary-display__section-title">Summary</div>
-              <div className="summary-display__text-block">
-                {summary ? effectiveSummaryText || 'No summary content found.' : 'Summary will appear here...'}
-              </div>
-              <div className="summary-display__section-title">Action Items</div>
-              {parsedSummary.actionItems.length > 0 ? (
-                <ul className="summary-display__list summary-display__list--actions">
-                  {parsedSummary.actionItems.map((item, idx) => (
-                    <li key={`action-${idx}`}>{item}</li>
-                  ))}
-                </ul>
-              ) : (
-                <div className="summary-display__empty">
-                  {summary && (parsedSummary.actionItemsNone || parsedSummary.hasActionSection) ? 'No action items.' : 'No action items yet.'}
+            {showSummaryProgress ? (
+              <div className="summary-progress" aria-live="polite">
+                <div className="summary-display__section-title">Summarizing</div>
+                <div className="summary-progress__hint">{summaryProgressHint}</div>
+                <div className="summary-progress__steps">
+                  {(summaryProgressSteps.length > 0 ? summaryProgressSteps : [{ key: 'pending', label: 'Preparing summary' }]).map((step, idx, steps) => {
+                    const isActive = idx === steps.length - 1
+                    return (
+                      <div key={step.key} className={`summary-progress__step${isActive ? ' summary-progress__step--active' : ''}`}>
+                        <span className="summary-progress__dot" aria-hidden="true" />
+                        <div className="summary-progress__content">
+                          <div className="summary-progress__label">{step.label}</div>
+                          {step.detail ? <div className="summary-progress__detail">{step.detail}</div> : null}
+                        </div>
+                      </div>
+                    )
+                  })}
                 </div>
-              )}
-            </>
+              </div>
+            ) : showSummaryError ? (
+              <>
+                <div className="summary-display__section-title">Summary</div>
+                <div className="summary-display__empty">Summary failed to generate.</div>
+                {summaryProgressMessage ? <div className="summary-progress__detail">{summaryProgressMessage}</div> : null}
+              </>
+            ) : (
+              <>
+                <div className="summary-display__section-title">Summary</div>
+                <div className="summary-display__text-block">
+                  {summary ? effectiveSummaryText || 'No summary content found.' : 'Summary will appear here...'}
+                </div>
+                <div className="summary-display__section-title">Action Items</div>
+                {parsedSummary.actionItems.length > 0 ? (
+                  <ul className="summary-display__list summary-display__list--actions">
+                    {parsedSummary.actionItems.map((item, idx) => (
+                      <li key={`action-${idx}`}>{item}</li>
+                    ))}
+                  </ul>
+                ) : (
+                  <div className="summary-display__empty">
+                    {summary && (parsedSummary.actionItemsNone || parsedSummary.hasActionSection) ? 'No action items.' : 'No action items yet.'}
+                  </div>
+                )}
+              </>
+            )}
           </div>
         </div>
 

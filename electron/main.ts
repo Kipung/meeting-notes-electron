@@ -27,7 +27,11 @@ export const RENDERER_DIST = path.join(process.env.APP_ROOT, 'dist')
 
 process.env.VITE_PUBLIC = VITE_DEV_SERVER_URL ? path.join(process.env.APP_ROOT, 'public') : RENDERER_DIST
 
-const DEFAULT_SUMMARY_MODEL_NAME = 'Llama-3.2-1B-Instruct-Q6_K.gguf'
+const PREFERRED_SUMMARY_MODEL_NAMES = [
+  'qwen2.5-3b-instruct-q4_k_m.gguf',
+  'Llama-3.2-1B-Instruct-Q6_K.gguf',
+]
+const DEFAULT_SUMMARY_MODEL_NAME = PREFERRED_SUMMARY_MODEL_NAMES[0]
 const DEFAULT_SILERO_VAD_URL = 'https://github.com/snakers4/silero-vad/raw/master/files/silero_vad.onnx'
 
 
@@ -52,6 +56,7 @@ type SummarizerEvent = {
 }
 const followUpRequests = new Map<string, { resolve: (value: FollowUpResult) => void; timeout: NodeJS.Timeout }>()
 const CHUNK_WORD_THRESHOLD = 900
+const FINAL_SUMMARY_DIRECT_TRANSCRIPT_WORD_THRESHOLD = 1400
 const AUDIO_FILE_EXTENSIONS = new Set(['.wav', '.mp3', '.m4a', '.flac', '.aac', '.ogg', '.webm'])
 const TRANSCRIPT_FILE_EXTENSIONS = new Set(['.txt', '.md', '.markdown', '.srt', '.vtt', '.log', '.json'])
 type ChunkTask = { id: number; text: string; sessionDir: string | null }
@@ -476,27 +481,39 @@ function startFinalSummary(fullText: string): void {
     .filter(Boolean)
   const leftoverStart = Math.min(lastTranscriptOffset, fullText.length)
   const leftover = fullText.slice(leftoverStart).trim()
-  const segments: string[] = []
-  if (orderedSummaries.length > 0) {
-    segments.push(`Previous chunk summaries:\n${orderedSummaries.join('\n\n')}`)
+  const transcriptWordCount = countWords(fullText)
+  let inputText = fullText
+  let finalChunkWords = CHUNK_WORD_THRESHOLD
+  const context: { type: 'final'; sessionDir: string; sourceTranscript?: string } = {
+    type: 'final',
+    sessionDir: pendingFinalSummarySession || currentSessionDir || '',
   }
-  if (leftover) {
-    segments.push(`Remaining transcript:\n${leftover}`)
+
+  if (transcriptWordCount <= FINAL_SUMMARY_DIRECT_TRANSCRIPT_WORD_THRESHOLD) {
+    finalChunkWords = Math.max(transcriptWordCount + 1, FINAL_SUMMARY_DIRECT_TRANSCRIPT_WORD_THRESHOLD)
+  } else if (orderedSummaries.length > 0) {
+    const segments: string[] = [`Previous chunk summaries:\n${orderedSummaries.join('\n\n')}`]
+    if (leftover) {
+      segments.push(`Remaining transcript:\n${leftover}`)
+    }
+    inputText = segments.join('\n\n')
+    finalChunkWords = Math.max(countWords(inputText) + 1, FINAL_SUMMARY_DIRECT_TRANSCRIPT_WORD_THRESHOLD)
+    context.sourceTranscript = fullText
   }
-  const inputText = segments.length > 0 ? segments.join('\n\n') : fullText
   const summarySessionDir = pendingFinalSummarySession || currentSessionDir
   if (!summarySessionDir) {
     console.error('final summary requested with no session directory')
     finalSummaryRunning = false
     return
   }
+  context.sessionDir = summarySessionDir
   const summaryOut = path.join(summarySessionDir, 'summary.txt')
   const payload = {
     cmd: 'summarize',
     text: inputText,
     out: summaryOut,
-    chunk_words: CHUNK_WORD_THRESHOLD,
-    context: { type: 'final', sessionDir: summarySessionDir },
+    chunk_words: finalChunkWords,
+    context,
   }
   const ok = sendProcessCommand(summarizerProcess, 'summarizer', JSON.stringify(payload) + '\n')
   if (!ok) {
@@ -769,10 +786,10 @@ function resolveSummaryModelPath(): string | null {
   if (downloadedSummaryModelPath && fs.existsSync(downloadedSummaryModelPath)) return downloadedSummaryModelPath
 
   const bundledCandidates = [
-    path.join(getModelsRoot(), DEFAULT_SUMMARY_MODEL_NAME),
-    path.join(getPackagedModelsRoot(), DEFAULT_SUMMARY_MODEL_NAME),
-    path.join(process.env.APP_ROOT!, 'models', DEFAULT_SUMMARY_MODEL_NAME),
-  ]
+    getModelsRoot(),
+    getPackagedModelsRoot(),
+    path.join(process.env.APP_ROOT!, 'models'),
+  ].flatMap((modelsDir) => PREFERRED_SUMMARY_MODEL_NAMES.map((modelName) => path.join(modelsDir, modelName)))
   for (const candidate of bundledCandidates) {
     if (fs.existsSync(candidate)) return candidate
   }
@@ -780,8 +797,10 @@ function resolveSummaryModelPath(): string | null {
   const candidates = [getModelsRoot(), getPackagedModelsRoot(), path.join(process.env.APP_ROOT!, 'models')]
   for (const modelsDir of candidates) {
     if (!fs.existsSync(modelsDir)) continue
-    const preferred = path.join(modelsDir, DEFAULT_SUMMARY_MODEL_NAME)
-    if (fs.existsSync(preferred)) return preferred
+    for (const modelName of PREFERRED_SUMMARY_MODEL_NAMES) {
+      const preferred = path.join(modelsDir, modelName)
+      if (fs.existsSync(preferred)) return preferred
+    }
     try {
       const entries = fs.readdirSync(modelsDir, { withFileTypes: true })
       const ggufs = entries
