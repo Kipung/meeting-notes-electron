@@ -23,6 +23,10 @@ Record meetings, transcribe with Whisper, and summarize with a local GGUF/GGML L
 - `ffmpeg/` - bundled ffmpeg binary for offline installer builds
 - `lib/` - ffmpeg dynamic libraries for macOS offline builds
 
+## Branch notes
+
+- `cleanup` branch summary: see `CLEANUP_BRANCH_NOTES.md`
+
 ## Setup
 
 ### FFmpeg install (after cloning)
