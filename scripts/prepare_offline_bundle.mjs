@@ -42,6 +42,19 @@ const copyDir = (src, dest) => {
   fs.cpSync(src, dest, { recursive: true, dereference: true })
 }
 
+const dedupePaths = (paths) => {
+  const seen = new Set()
+  const unique = []
+  for (const value of paths) {
+    if (!value) continue
+    const resolved = path.resolve(value)
+    if (seen.has(resolved)) continue
+    seen.add(resolved)
+    unique.push(resolved)
+  }
+  return unique
+}
+
 const findFileRecursive = (rootDir, targetName, maxDepth = 8) => {
   if (!fs.existsSync(rootDir)) return null
   const stack = [{ dir: rootDir, depth: 0 }]
@@ -96,22 +109,25 @@ if (!fs.existsSync(destPythonBin)) {
   throw new Error(`python binary missing after copy: ${destPythonBin}`)
 }
 
-const whisperDir = path.join(root, 'whisper')
-const whisperDest = path.join(whisperDir, `${whisperModel}.pt`)
+const whisperDir = path.join(root, 'models', 'whisper')
+const whisperRepoIdDir = `models--Systran--faster-whisper-${whisperModel}`
+const whisperCacheDir = path.join(whisperDir, whisperRepoIdDir)
 fs.mkdirSync(whisperDir, { recursive: true })
 
-if (!fs.existsSync(whisperDest)) {
-  const cacheCandidates = [
+if (!fs.existsSync(whisperCacheDir)) {
+  const cacheCandidates = dedupePaths([
     process.env.WHISPER_ROOT,
-    path.join(os.homedir(), 'Library', 'Caches', 'whisper'),
-    path.join(os.homedir(), '.cache', 'whisper'),
-  ].filter(Boolean)
+    process.env.HF_HOME ? path.join(process.env.HF_HOME, 'hub') : null,
+    process.env.XDG_CACHE_HOME ? path.join(process.env.XDG_CACHE_HOME, 'huggingface', 'hub') : null,
+    path.join(os.homedir(), '.cache', 'huggingface', 'hub'),
+    path.join(os.homedir(), 'Library', 'Caches', 'huggingface', 'hub'),
+  ])
 
   let copied = false
   for (const dir of cacheCandidates) {
-    const candidate = path.join(dir, `${whisperModel}.pt`)
+    const candidate = path.join(dir, whisperRepoIdDir)
     if (fs.existsSync(candidate)) {
-      fs.copyFileSync(candidate, whisperDest)
+      copyDir(candidate, whisperCacheDir)
       copied = true
       break
     }
@@ -119,13 +135,30 @@ if (!fs.existsSync(whisperDest)) {
 
   if (!copied) {
     runPython(
-      `import whisper; whisper.load_model("${whisperModel}", download_root=r"${whisperDir.replace(/\\/g, '\\\\')}"); print("ok")`
+      `
+from faster_whisper import WhisperModel
+import numpy as np
+
+last_error = None
+for compute_type in ("int8", "float32"):
+    try:
+        model = WhisperModel(${JSON.stringify(whisperModel)}, device="cpu", compute_type=compute_type, download_root=${JSON.stringify(whisperDir)})
+        segments, _ = model.transcribe(np.zeros(16000, dtype=np.float32), language="en", task="transcribe")
+        for _ in segments:
+            pass
+        print("ok")
+        break
+    except Exception as exc:
+        last_error = exc
+else:
+    raise SystemExit(str(last_error) if last_error else "failed to prepare faster-whisper model")
+`
     )
   }
 }
 
-if (!fs.existsSync(whisperDest)) {
-  throw new Error(`whisper model not found after preparation: ${whisperDest}`)
+if (!fs.existsSync(whisperCacheDir)) {
+  throw new Error(`faster-whisper model cache not found after preparation: ${whisperCacheDir}`)
 }
 
 const torchCacheDir = path.join(root, 'torch_cache')
@@ -207,7 +240,8 @@ if (process.platform === 'darwin' || process.platform === 'linux') {
 
 console.log('Offline bundle prepared:')
 console.log(`- python: ${destPython}`)
-console.log(`- whisper: ${whisperDest}`)
+console.log(`- whisper root: ${whisperDir}`)
+console.log(`- whisper cache: ${whisperCacheDir}`)
 console.log(`- torch cache: ${torchCacheDir}`)
 console.log(`- silero vad: ${vadDest}`)
 console.log(`- ffmpeg: ${ffmpegDest}`)

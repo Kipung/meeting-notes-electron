@@ -1,8 +1,7 @@
 import { useEffect, useMemo, useRef, useState, type DragEvent } from 'react'
 import './App.css'
 
-const DEFAULT_WHISPER_MODEL = 'medium.en'
-const SUMMARY_META_PLACEHOLDER = '(not provided)'
+const DEFAULT_WHISPER_MODEL = 'small.en'
 type StepState = 'idle' | 'running' | 'paused' | 'done' | 'error'
 type DroppedFile = File & { path?: string }
 const backend = window.backend
@@ -289,7 +288,7 @@ function App() {
   const [summary, setSummary] = useState('')
   const [sessionDir, setSessionDir] = useState<string | null>(null)
   const [sessionsRoot, setSessionsRoot] = useState<string | null>(null)
-  const [sessionModality, setSessionModality] = useState('Email')
+  const [sessionModality, setSessionModality] = useState('')
   const [sessionSubject, setSessionSubject] = useState('')
   const [coachInitials, setCoachInitials] = useState('')
   const [studentId, setStudentId] = useState('')
@@ -450,6 +449,28 @@ function App() {
     return `${minutes}:${String(seconds).padStart(2, '0')}`
   }
 
+  const sessionMetadataPayload = useMemo<BackendSessionMetadataPayload>(
+    () => ({
+      modality: sessionModality.trim(),
+      subject: sessionSubject.trim(),
+      studentId: studentId.trim(),
+      studentName: studentName.trim(),
+      coachInitials: coachInitials.trim(),
+    }),
+    [sessionModality, sessionSubject, studentId, studentName, coachInitials]
+  )
+
+  const syncSessionMetadataActive =
+    Boolean(sessionDir) &&
+    (running || recordingState === 'paused' || transcriptionState === 'running' || summarizationState === 'running')
+
+  useEffect(() => {
+    if (!syncSessionMetadataActive) return
+    void backend.setSessionMetadata(sessionMetadataPayload).catch((e) => {
+      console.error('setSessionMetadata failed', e)
+    })
+  }, [syncSessionMetadataActive, sessionMetadataPayload])
+
   const normalizePath = (value: string) => value.replace(/\\/g, '/')
   const compactPath = (value: string, root?: string | null) => {
     const raw = normalizePath(value)
@@ -492,6 +513,7 @@ function App() {
       deviceIndex: selectedDevice ?? undefined,
       loopbackDeviceIndex: selectedLoopback ?? undefined,
       model: DEFAULT_WHISPER_MODEL,
+      metadata: sessionMetadataPayload,
     })
   }
 
@@ -547,7 +569,7 @@ function App() {
     setStatus('transcribing')
     setStatusDetail('processing uploaded audio...')
     try {
-      const res = await backend.processRecording()
+      const res = await backend.processRecording({ metadata: sessionMetadataPayload })
       if (!res?.ok) {
         if (res?.error === 'no file selected') {
           setStatus('idle')
@@ -575,7 +597,7 @@ function App() {
     setStatus('transcribing')
     setStatusDetail('processing uploaded transcript...')
     try {
-      const res = await backend.processTranscriptFile()
+      const res = await backend.processTranscriptFile({ metadata: sessionMetadataPayload })
       if (!res?.ok) {
         if (res?.error === 'no file selected') {
           setStatus('idle')
@@ -612,7 +634,7 @@ function App() {
     setStatusDetail('summarizing current transcript text...')
     setSummarizationState('running')
     try {
-      const res = await backend.summarizeTranscriptText(text)
+      const res = await backend.summarizeTranscriptText({ text, metadata: sessionMetadataPayload })
       if (!res?.ok) {
         setStatus('summary-error')
         setStatusDetail(res?.error || 'failed to summarize transcript text')
@@ -660,7 +682,7 @@ function App() {
     setSummaryProgressSteps([])
     setProcessingTranscriptFile(true)
     try {
-      const res = await backend.processInputPath(droppedPath)
+      const res = await backend.processInputPath({ inputPath: droppedPath, metadata: sessionMetadataPayload })
       if (!res?.ok) {
         setStatus('transcription-error')
         setStatusDetail(res?.error || 'failed to process dropped file')
@@ -696,13 +718,21 @@ function App() {
       }).format(new Date()),
     []
   )
-  const summaryModalityText = cleanLine(sessionModality) || SUMMARY_META_PLACEHOLDER
-  const summarySubjectText = cleanLine(sessionSubject) || SUMMARY_META_PLACEHOLDER
-  const summaryCoachText = cleanLine(coachInitials) || SUMMARY_META_PLACEHOLDER
-  const summaryStudentNameText = cleanLine(studentName) || SUMMARY_META_PLACEHOLDER
-  const summaryStudentIdText = cleanLine(studentId) || SUMMARY_META_PLACEHOLDER
-  const summaryHeaderLine = `${summaryDateText} ${summaryModalityText} re: ${summarySubjectText} - ${summaryCoachText}`
-  const summaryHeaderSubline = `Student: ${summaryStudentNameText} | Student ID: ${summaryStudentIdText}`
+  const summaryModalityText = cleanLine(sessionModality)
+  const summarySubjectText = cleanLine(sessionSubject)
+  const summaryCoachText = cleanLine(coachInitials)
+  const summaryStudentNameText = cleanLine(studentName)
+  const summaryStudentIdText = cleanLine(studentId)
+  const summaryHeaderLead = [summaryDateText, summaryModalityText].filter(Boolean).join(' ')
+  const summaryHeaderLine = [
+    summaryHeaderLead,
+    summarySubjectText ? `re: ${summarySubjectText}` : '',
+    summaryCoachText,
+  ].filter(Boolean).join(' - ')
+  const summaryHeaderSubline = [
+    summaryStudentNameText ? `Student: ${summaryStudentNameText}` : '',
+    summaryStudentIdText ? `Student ID: ${summaryStudentIdText}` : '',
+  ].filter(Boolean).join(' | ')
   const normalizedSummaryBody = summary
     ? [
         'Summary:',
@@ -718,7 +748,7 @@ function App() {
         summaryHeaderSubline,
         '',
         normalizedSummaryBody,
-      ].join('\n')
+      ].filter(Boolean).join('\n')
     : summary
   const sessionDirLabel = sessionDir ? compactPath(sessionDir, sessionsRoot) : null
   const sessionsRootLabel = sessionsRoot ? compactPath(sessionsRoot) : '(loading...)'
@@ -898,6 +928,7 @@ function App() {
               <label className="field field--modality">
                 <span>Modality</span>
                 <select value={sessionModality} onChange={(e) => setSessionModality(e.target.value)} style={{ width: '100%' }}>
+                  <option value="">Select modality</option>
                   <option value="Email">Email</option>
                   <option value="Walk-In">Walk-In</option>
                   <option value="Virtual Office Hour">Virtual Office Hour</option>

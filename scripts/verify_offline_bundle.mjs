@@ -9,7 +9,7 @@ if (process.env.SKIP_BUNDLE_CHECK === '1') {
   process.exit(0)
 }
 
-const expectedVersionRaw = process.env.EXPECTED_PYTHON_VERSION || '3.10,3.11'
+const expectedVersionRaw = process.env.EXPECTED_PYTHON_VERSION || '3.10,3.11,3.14'
 const whisperModel = process.env.WHISPER_MODEL || 'small.en'
 const summaryModelName = process.env.SUMMARY_MODEL_NAME || 'qwen2.5-3b-instruct-q4_k_m.gguf'
 

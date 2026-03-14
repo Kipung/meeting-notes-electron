@@ -1,9 +1,12 @@
 import threading
 import unittest
+from unittest import mock
 
+import backend.summarizer_daemon as summarizer_daemon
 from backend.summarizer_daemon import (
     CHUNK_SUMMARY_PROMPT,
     DEFAULT_PROMPT,
+    FINAL_METADATA_PROMPT_GUIDANCE,
     SummarizerDaemon,
     compress_chunk_summaries_for_final,
     count_words,
@@ -48,7 +51,11 @@ class SummarizerDaemonTests(unittest.TestCase):
     def test_prompts_forbid_invented_roles_and_generic_admin_tasks(self):
         self.assertIn("You are a meeting notes summarizer.", DEFAULT_PROMPT)
         self.assertIn("Do not invent facts, names, roles, or action items.", DEFAULT_PROMPT)
+        self.assertIn("Prefer concrete nouns and entities already named in the meeting content", DEFAULT_PROMPT)
+        self.assertIn("Do not turn tentative suggestions, scheduling possibilities, or follow-up checks into confirmed outcomes.", DEFAULT_PROMPT)
         self.assertIn("Action Items:", DEFAULT_PROMPT)
+        self.assertIn("use it to frame the opening sentence", FINAL_METADATA_PROMPT_GUIDANCE)
+        self.assertIn("Do not include a student ID unless it is necessary for clarity.", FINAL_METADATA_PROMPT_GUIDANCE)
         self.assertIn("You are a meeting notes summarizer.", CHUNK_SUMMARY_PROMPT)
         self.assertIn("Do not invent facts, names, roles, or action items.", CHUNK_SUMMARY_PROMPT)
 
@@ -143,6 +150,209 @@ class SummarizerDaemonTests(unittest.TestCase):
         self.assertIn(DEFAULT_PROMPT.strip(), client.calls[0]["prompt"])
         self.assertNotIn(CHUNK_SUMMARY_PROMPT.strip(), client.calls[0]["prompt"])
 
+    def test_final_summary_uses_session_metadata_as_supporting_context(self):
+        client = StaticClient(
+            "Summary:\n"
+            "The coach and student reviewed attendance and tutoring plans.\n\n"
+            "Action Items:\n"
+            "- Student: attend tutoring this week."
+        )
+        daemon = SummarizerDaemon.__new__(SummarizerDaemon)
+        daemon.model_path = "mock://summary"
+        daemon.n_ctx = 2048
+        daemon.min_words = 1
+        daemon.client = client
+        daemon.lock = threading.Lock()
+        daemon.send = lambda _obj: None  # type: ignore[assignment]
+
+        daemon.summarize(
+            "Coach: We reviewed attendance and tutoring support for algebra.",
+            out_path=None,
+            chunk_words=600,
+            context={
+                "type": "final",
+                "sessionDir": "mock/session",
+                "subject": "Algebra",
+                "student_name": "Ada Lovelace",
+                "coach": "KL",
+            },
+        )
+
+        self.assertTrue(client.calls)
+        prompt = client.calls[0]["prompt"]
+        self.assertIn(FINAL_METADATA_PROMPT_GUIDANCE.strip(), prompt)
+        self.assertIn("Session metadata (supporting context):", prompt)
+        self.assertIn("- Subject: Algebra", prompt)
+        self.assertIn("- Student Name: Ada Lovelace", prompt)
+        self.assertIn("- Coach: KL", prompt)
+        self.assertIn("Meeting content:\nCoach: We reviewed attendance and tutoring support for algebra.", prompt)
+
+    def test_final_summary_prompt_omits_student_id_from_supporting_metadata(self):
+        client = StaticClient(
+            "Summary:\n"
+            "The coach and student reviewed attendance and tutoring plans.\n\n"
+            "Action Items: none."
+        )
+        daemon = SummarizerDaemon.__new__(SummarizerDaemon)
+        daemon.model_path = "mock://summary"
+        daemon.n_ctx = 2048
+        daemon.min_words = 1
+        daemon.client = client
+        daemon.lock = threading.Lock()
+        daemon.send = lambda _obj: None  # type: ignore[assignment]
+
+        daemon.summarize(
+            "Coach: We reviewed attendance and tutoring support for algebra.",
+            out_path=None,
+            chunk_words=600,
+            context={
+                "type": "final",
+                "sessionDir": "mock/session",
+                "subject": "Algebra",
+                "student_name": "Ada Lovelace",
+                "student_id": "S123456",
+                "coach": "KL",
+            },
+        )
+
+        self.assertTrue(client.calls)
+        prompt = client.calls[0]["prompt"]
+        self.assertNotIn("- Student ID: S123456", prompt)
+        self.assertIn("- Student Name: Ada Lovelace", prompt)
+
+    def test_short_final_transcript_does_not_use_metadata_to_bypass_min_words(self):
+        client = StaticClient("Summary:\nShould not be used.\n\nAction Items: none.")
+        daemon = SummarizerDaemon.__new__(SummarizerDaemon)
+        daemon.model_path = "mock://summary"
+        daemon.n_ctx = 2048
+        daemon.min_words = 20
+        daemon.client = client
+        daemon.lock = threading.Lock()
+
+        events = []
+        daemon.send = lambda obj: events.append(obj)  # type: ignore[assignment]
+        daemon.summarize(
+            "Thanks.",
+            out_path=None,
+            chunk_words=600,
+            context={
+                "type": "final",
+                "sessionDir": "mock/session",
+                "subject": "Algebra",
+                "student_name": "Ada Lovelace",
+                "coach": "KL",
+            },
+        )
+
+        self.assertEqual(client.calls, [])
+        done = next((event for event in events if event.get("event") == "done"), None)
+        self.assertIsNotNone(done)
+        self.assertEqual(done.get("text"), "Summary:\nNot enough content to summarize.\n\nAction Items: none.")
+
+    def test_final_summary_injects_subject_metadata_when_model_output_is_generic(self):
+        client = StaticClient(
+            "Summary:\n"
+            "Alex agreed to attend two tutoring sessions and complete the correction packet before the next meeting.\n\n"
+            "Action Items: none."
+        )
+        daemon = SummarizerDaemon.__new__(SummarizerDaemon)
+        daemon.model_path = "mock://summary"
+        daemon.n_ctx = 2048
+        daemon.min_words = 1
+        daemon.client = client
+        daemon.lock = threading.Lock()
+
+        events = []
+        daemon.send = lambda obj: events.append(obj)  # type: ignore[assignment]
+        daemon.summarize(
+            (
+                "Coach: We reviewed the missed quizzes, unfinished labs, and tutoring options for chemistry. "
+                "Student: I agreed to attend two tutoring sessions this week, finish the correction packet, "
+                "and send an update before the next check-in."
+            ),
+            out_path=None,
+            chunk_words=600,
+            context={
+                "type": "final",
+                "sessionDir": "mock/session",
+                "modality": "Virtual Appointment",
+                "subject": "CHEM 120 recovery plan",
+                "student_name": "Alex Rivera",
+                "student_id": "S123456",
+            },
+        )
+
+        done = next((event for event in events if event.get("event") == "done"), None)
+        self.assertIsNotNone(done)
+        summary_text = done.get("text", "")
+        self.assertIn("CHEM 120 recovery plan", summary_text)
+        self.assertIn("Virtual Appointment", summary_text)
+        self.assertNotIn("S123456", summary_text)
+
+    def test_final_summary_metadata_prefix_keeps_generic_meeting_lead_readable(self):
+        client = StaticClient(
+            "Summary:\n"
+            "The meeting focused on missing appeal documents and submission timing.\n\n"
+            "Action Items: none."
+        )
+        daemon = SummarizerDaemon.__new__(SummarizerDaemon)
+        daemon.model_path = "mock://summary"
+        daemon.n_ctx = 2048
+        daemon.min_words = 1
+        daemon.client = client
+        daemon.lock = threading.Lock()
+
+        events = []
+        daemon.send = lambda obj: events.append(obj)  # type: ignore[assignment]
+        daemon.summarize(
+            "Coach: We reviewed the missing appeal documents and the next deadline.",
+            out_path=None,
+            chunk_words=600,
+            context={
+                "type": "final",
+                "sessionDir": "mock/session",
+                "modality": "Phone Appointment",
+                "subject": "SAP appeal follow-up",
+            },
+        )
+
+        done = next((event for event in events if event.get("event") == "done"), None)
+        self.assertIsNotNone(done)
+        summary_text = done.get("text", "")
+        self.assertIn(
+            "During the Phone Appointment about SAP appeal follow-up, the meeting focused",
+            summary_text,
+        )
+
+    def test_chunk_summary_does_not_embed_session_metadata(self):
+        client = StaticClient("The session focused on assignment planning.")
+        daemon = SummarizerDaemon.__new__(SummarizerDaemon)
+        daemon.model_path = "mock://summary"
+        daemon.n_ctx = 2048
+        daemon.min_words = 1
+        daemon.client = client
+        daemon.lock = threading.Lock()
+        daemon.send = lambda _obj: None  # type: ignore[assignment]
+
+        daemon.summarize(
+            "Student: I will submit the assignment by Friday.",
+            out_path=None,
+            chunk_words=600,
+            context={
+                "type": "chunk",
+                "id": 2,
+                "sessionDir": "mock/session",
+                "subject": "Physics",
+                "student_name": "Ada Lovelace",
+            },
+        )
+
+        self.assertTrue(client.calls)
+        prompt = client.calls[0]["prompt"]
+        self.assertNotIn(FINAL_METADATA_PROMPT_GUIDANCE.strip(), prompt)
+        self.assertNotIn("Session metadata (supporting context):", prompt)
+        self.assertNotIn("Ada Lovelace", prompt)
+
     def test_streaming_delta_chunks_do_not_drop_repeated_tokens(self):
         client = StreamingDeltaClient(["the student reviewed ", "the ", "schedule and ", "the timeline."])
         streamed = []
@@ -155,6 +365,13 @@ class SummarizerDaemonTests(unittest.TestCase):
         )
         self.assertEqual(result, "the student reviewed the schedule and the timeline.")
         self.assertEqual("".join(streamed), "the student reviewed the schedule and the timeline.")
+
+    def test_create_llama_defers_import_failure_until_model_load(self):
+        with mock.patch.object(summarizer_daemon, "Llama", None), mock.patch.object(
+            summarizer_daemon, "LLAMA_IMPORT_ERROR", "No module named 'llama_cpp'"
+        ):
+            with self.assertRaisesRegex(RuntimeError, "No module named 'llama_cpp'"):
+                summarizer_daemon.create_llama("mock://model.gguf", 2048)
 
     def test_compress_chunk_summaries_respects_budget_and_keeps_high_importance(self):
         chunk_summaries = [

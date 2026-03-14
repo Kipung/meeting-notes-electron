@@ -9,6 +9,7 @@
     "build:publish": "node scripts/verify_offline_bundle.mjs && tsc && vite build && electron-builder --publish=always",
     "prepare:offline": "node scripts/prepare_offline_bundle.mjs",
     "lint": "eslint . --ext ts,tsx --report-unused-disable-directives --max-warnings 0",
+    "test": "node scripts/run_python_unittest.mjs",
     "preview": "vite preview"
   },
   "dependencies": {

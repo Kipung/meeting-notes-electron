@@ -13,10 +13,19 @@ declare global {
 
   type BackendStatusState = 'idle' | 'starting' | 'running' | 'paused' | 'done' | 'error'
 
+  interface BackendSessionMetadataPayload {
+    modality?: string
+    subject?: string
+    studentId?: string
+    studentName?: string
+    coachInitials?: string
+  }
+
   interface BackendStartOptions {
     deviceIndex?: number
     loopbackDeviceIndex?: number
     model?: string
+    metadata?: BackendSessionMetadataPayload
   }
 
   interface BackendSimpleResult {
@@ -34,6 +43,18 @@ declare global {
     instructions?: string
     temperature?: number
     maxTokens?: number
+  }
+
+  interface BackendProcessWithMetadataPayload {
+    metadata?: BackendSessionMetadataPayload
+  }
+
+  interface BackendSummarizeTranscriptPayload extends BackendProcessWithMetadataPayload {
+    text: string
+  }
+
+  interface BackendProcessInputPathPayload extends BackendProcessWithMetadataPayload {
+    inputPath: string
   }
 
   interface BackendGenerateFollowUpResult extends BackendSimpleResult {
@@ -112,12 +133,13 @@ declare global {
     listDevices: () => Promise<BackendListDevicesResult>
     getSessionsRoot: () => Promise<string | null>
     chooseSessionsRoot: () => Promise<string | null>
+    setSessionMetadata: (metadata: BackendSessionMetadataPayload) => Promise<BackendSimpleResult>
     deleteSessionAudio: (sessionDir: string) => Promise<BackendDeleteSessionAudioResult>
     generateFollowUpEmail: (payload: BackendGenerateFollowUpPayload) => Promise<BackendGenerateFollowUpResult>
-    processRecording: () => Promise<BackendSimpleResult>
-    processTranscriptFile: () => Promise<BackendSimpleResult>
-    summarizeTranscriptText: (text: string) => Promise<BackendSimpleResult>
-    processInputPath: (inputPath: string) => Promise<BackendSimpleResult>
+    processRecording: (payload?: BackendProcessWithMetadataPayload) => Promise<BackendSimpleResult>
+    processTranscriptFile: (payload?: BackendProcessWithMetadataPayload) => Promise<BackendSimpleResult>
+    summarizeTranscriptText: (payload: BackendSummarizeTranscriptPayload) => Promise<BackendSimpleResult>
+    processInputPath: (payload: BackendProcessInputPathPayload) => Promise<BackendSimpleResult>
     onSession: (cb: BackendEventHandler<SessionStartedEvent>) => () => void
     onTranscript: (cb: BackendEventHandler<TranscriptReadyEvent>) => () => void
     onTranscriptPartial: (cb: BackendEventHandler<TranscriptPartialEvent>) => () => void

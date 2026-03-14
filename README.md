@@ -5,7 +5,7 @@ Record meetings, transcribe with Whisper, and summarize with a local GGUF/GGML L
 ## Features
 
 - Record from a selected input device
-- Whisper transcription with selectable model size
+- Whisper transcription using the bundled `small.en` model by default
 - Automatic summarization after transcription using a local LLM (GGUF/GGML) via llama-cpp
 - Multi-pass chunked summarization for long meetings
 - Background chunk transcription to reduce wait time after Stop
@@ -17,9 +17,9 @@ Record meetings, transcribe with Whisper, and summarize with a local GGUF/GGML L
 - `src/` - renderer UI
 - `backend/` - Python scripts for recording, transcription, summarization
 - `models/` - local GGUF/GGML model files
+- `models/whisper/` - bundled Faster-Whisper cache for offline installer builds
 - `sessions/` - legacy dev output (current outputs go to `app.getPath('userData')/sessions`)
 - `python/` - bundled Python runtime for offline installer builds
-- `whisper/` - bundled Whisper model files (e.g. `small.en.pt`)
 - `ffmpeg/` - bundled ffmpeg binary for offline installer builds
 - `lib/` - ffmpeg dynamic libraries for macOS offline builds
 
@@ -173,7 +173,7 @@ This produces an installer that works without internet by bundling Python, Whisp
 brew install node ffmpeg portaudio
 ```
 
-2) Create a Python env (3.10 or 3.11) and install deps:
+2) Create a Python env (3.10, 3.11, or 3.14) and install deps:
 
 ```bash
 conda create -n meeting-notes-runtime python=3.11 -y
@@ -195,7 +195,7 @@ pnpm install
 hf download unsloth/Llama-3.2-3B-Instruct-GGUF Llama-3.2-3B-Instruct-Q4_K_M.gguf --local-dir models --local-dir-use-symlinks False
 ```
 
-5) Prepare the offline bundle (copies Python, Whisper model, ffmpeg, and libs):
+5) Prepare the offline bundle (copies Python, the Faster-Whisper cache, ffmpeg, and libs):
 
 ```bash
 pnpm prepare:offline --python-bin "$HOME/miniconda3/envs/meeting-notes-runtime/bin/python" --ffmpeg "$(which ffmpeg)" --force
@@ -221,7 +221,7 @@ pnpm build
 winget install OpenJS.NodeJS
 ```
 
-2) Create a Python env (3.10 or 3.11) and install deps:
+2) Create a Python env (3.10, 3.11, or 3.14) and install deps:
 
 ```powershell
 conda create -n meeting-notes-runtime python=3.11 -y
@@ -310,7 +310,7 @@ All of the bundled python helpers now read configuration from environment variab
 
 ```bash
 WHISPER_MODEL=small.en python3 backend/record_and_transcribe.py
-WHISPER_MODEL=small.en WHISPER_DIR=/path/to/whisper/python3 backend/setup.py
+WHISPER_MODEL=small.en WHISPER_DIR=/path/to/models/whisper python3 backend/setup.py
 TRANSCRIBE_AUDIO=/path/to/audio.wav TRANSCRIPT_OUT=/path/to/transcript.txt TRANSCRIBE_MODEL=small.en python3 backend/transcribe_file.py
 ```
 
@@ -346,13 +346,14 @@ pnpm build
 Notes:
 - `backend/` scripts are bundled via `electron-builder.json5` (`extraResources`).
 - The app performs a preflight setup on launch and blocks Start until dependencies and models are ready.
-- Offline installer requirements: bundle `python/`, `models/`, and `whisper/` directories in the project root before building. These are copied into the app via `extraResources`.
+- The current renderer flow starts transcription with `small.en`; alternate Whisper models are not exposed as a user-selectable UI feature.
+- Offline installer requirements: populate `python/`, `models/`, `ffmpeg/`, and `lib/` (macOS) in the project root before building. These are copied into the app via `extraResources`.
 - The bundled `python/` must contain `bin/python3` (mac) or `python.exe` (Windows).
-- Whisper models are loaded from `app.getPath('userData')/whisper` and are copied from the bundled `whisper/` on first run (override with `WHISPER_MODEL`).
+- Whisper models are loaded from `models/whisper/` in dev or bundled resources (override with `WHISPER_ROOT`).
 - The summary model is loaded from bundled `models/` (or `app.getPath('userData')/models` if you add additional files).
 - The bundled `ffmpeg/` must contain `ffmpeg` (mac) or `ffmpeg.exe` (Windows). You can override with `FFMPEG_PATH`.
 - macOS: copy ffmpeg’s dependent `.dylib` files into `lib/` so the binary can run in the packaged app.
-- The build validates the offline bundle; set `EXPECTED_PYTHON_VERSION=3.11` (or `3.10,3.11` / `3.10-3.11`) to enforce a version range, or `SKIP_BUNDLE_CHECK=1` to bypass.
+- The build validates the offline bundle; set `EXPECTED_PYTHON_VERSION=3.11` (or `3.10,3.11,3.14` / `3.10-3.11,3.14`) to enforce a version range, or `SKIP_BUNDLE_CHECK=1` to bypass.
 
 ### Offline bundle prep
 
@@ -360,15 +361,14 @@ Before building the installer, populate these folders at the project root:
 
 ```
 python/   # runtime with bin/python3 (mac) or python.exe (windows)
-models/   # GGUF model(s), e.g. qwen2.5-3b-instruct-q4_k_m.gguf
-whisper/  # Whisper model(s), e.g. small.en.pt
+models/   # GGUF model(s) plus models/whisper/ for Faster-Whisper cache data
 ffmpeg/   # ffmpeg binary, e.g. ffmpeg or ffmpeg.exe
 lib/      # ffmpeg .dylib files for macOS
 ```
 
 The app will error at setup time if any required bundled files are missing.
 
-Quick helper (builds `python/` from your current Python env and copies/downloads the Whisper model):
+Quick helper (builds `python/` from your current Python env and materializes the Faster-Whisper cache under `models/whisper/`):
 
 ```bash
 pnpm prepare:offline

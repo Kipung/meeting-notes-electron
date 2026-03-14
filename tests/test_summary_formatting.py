@@ -414,6 +414,115 @@ class SummaryFormattingTests(unittest.TestCase):
         self.assertIn("drop meteorology", summary_body)
         self.assertIn("- Student: needs to drop meteorology in order to add avionics", output)
 
+    def test_finalize_summary_output_explicit_actions_rejects_weak_inferred_placeholders(self):
+        transcript = (
+            "Coach reviewed replacing the legacy networking lab with the cybersecurity lab. "
+            "The cybersecurity lab conflicts with choir, so it fits better next term. "
+            "The student needs to drop weather systems to add the cybersecurity lab. "
+            "Coach asked the student to email the registrar to confirm the waitlist."
+        )
+        raw_summary = (
+            "Summary:\n"
+            "The plan was to replace the old lab with the new one. "
+            "The class may need to be taken next term. "
+            "The student should already be on the waitlist.\n\n"
+            "Action Items:\n"
+            "- Student: email the registrar to confirm the waitlist"
+        )
+
+        output = finalize_summary_output_explicit_actions(raw_summary, transcript)
+        summary_body = extract_summary_body(output).lower()
+
+        self.assertNotIn("the plan was", summary_body)
+        self.assertNotIn("the class may need", summary_body)
+        self.assertNotIn("should already be on the waitlist", summary_body)
+        self.assertIn("cybersecurity lab", summary_body)
+        self.assertIn("weather systems", output.lower())
+
+    def test_finalize_summary_output_explicit_actions_rejects_conversational_transcript_fragments(self):
+        transcript = (
+            "Coach said the cybersecurity lab fits better next term because of the choir conflict. "
+            "Coach confirmed there is no reason to retake navigation systems because the prior grade already counts. "
+            "The student needs to drop weather systems to add the cybersecurity lab."
+        )
+        raw_summary = (
+            "Summary:\n"
+            "The participant plans to take that in a different semester because of the schedule conflict. "
+            "Oh, so there would be no reason to retake it. "
+            "The student needs to drop weather systems to add the cybersecurity lab.\n\n"
+            "Action Items:\n"
+            "- Student: needs to drop weather systems to add the cybersecurity lab"
+        )
+
+        output = finalize_summary_output_explicit_actions(raw_summary, transcript)
+        summary_body = extract_summary_body(output).lower()
+
+        self.assertNotIn("oh, so", summary_body)
+        self.assertNotIn("take that", summary_body)
+        self.assertNotIn("retake it", summary_body)
+        self.assertIn("cybersecurity lab", summary_body)
+
+    def test_finalize_summary_output_explicit_actions_rejects_optional_suggestion_sentences(self):
+        transcript = (
+            "Coach reviewed orientation requirements and transfer questions. "
+            "The student needs to submit the transfer form before enrollment closes. "
+            "Coach mentioned the student could ask the front desk to confirm orientation hours."
+        )
+        raw_summary = (
+            "Summary:\n"
+            "The student could ask the front desk to confirm orientation hours. "
+            "The student needs to submit the transfer form before enrollment closes.\n\n"
+            "Action Items:\n"
+            "- Student: needs to submit the transfer form before enrollment closes"
+        )
+
+        output = finalize_summary_output_explicit_actions(raw_summary, transcript)
+        summary_body = extract_summary_body(output).lower()
+
+        self.assertNotIn("could ask the front desk", summary_body)
+        self.assertIn("submit the transfer form", summary_body)
+
+    def test_finalize_summary_output_explicit_actions_rejects_low_signal_comparison_fragments(self):
+        transcript = (
+            "Coach compared two elective options. "
+            "The student needs to submit the practicum request before Friday. "
+            "Neither option changes the graduation timeline."
+        )
+        raw_summary = (
+            "Summary:\n"
+            "Neither of those classes are absolutely essential. "
+            "The student needs to submit the practicum request before Friday.\n\n"
+            "Action Items:\n"
+            "- Student: needs to submit the practicum request before Friday"
+        )
+
+        output = finalize_summary_output_explicit_actions(raw_summary, transcript)
+        summary_body = extract_summary_body(output).lower()
+
+        self.assertNotIn("neither of those classes", summary_body)
+        self.assertIn("practicum request", summary_body)
+
+    def test_finalize_summary_output_explicit_actions_reduces_summary_action_duplication(self):
+        transcript = (
+            "The student needs to drop weather systems to add the cybersecurity lab. "
+            "The cybersecurity lab conflicts with choir, so it fits better next term. "
+            "Coach asked the student to email the registrar to confirm the waitlist."
+        )
+        raw_summary = (
+            "Summary:\n"
+            "The student needs to drop weather systems to add the cybersecurity lab. "
+            "The cybersecurity lab conflicts with choir, so it fits better next term.\n\n"
+            "Action Items:\n"
+            "- Student: needs to drop weather systems to add the cybersecurity lab\n"
+            "- Student: email the registrar to confirm the waitlist"
+        )
+
+        output = finalize_summary_output_explicit_actions(raw_summary, transcript)
+        summary_body = extract_summary_body(output).lower()
+
+        self.assertIn("conflicts with choir", summary_body)
+        self.assertEqual(output.lower().count("drop weather systems to add the cybersecurity lab"), 1)
+
     def test_finalize_summary_output_explicit_actions_prefers_transcript_grounded_summary(self):
         transcript = (
             "Student needs to drop meteorology in order to add modern avionics this semester. "
@@ -493,6 +602,29 @@ class SummaryFormattingTests(unittest.TestCase):
         self.assertIn("modern avionics", summary_body.lower())
         self.assertIn("conflicts with chapel", summary_body.lower())
         self.assertNotIn("1030 to 12 is when avionics is", summary_body.lower())
+
+    def test_finalize_summary_output_model_first_prefers_general_summary_over_schedule_chatter(self):
+        transcript = (
+            "10:30 to 12 is when avionics is. "
+            "Right now the student has chapel in that area. "
+            "The student needs to drop meteorology in order to add avionics. "
+            "That'd be flight 117, so that the student can get it started."
+        )
+        raw_summary = (
+            "Summary:\n"
+            "The discussion focused on adjusting the student's schedule to add avionics while resolving a course conflict.\n\n"
+            "Action Items: none."
+        )
+
+        output = finalize_summary_output_model_first(raw_summary, transcript)
+        summary_body = extract_summary_body(output).lower()
+
+        self.assertIn("adjusting the student's schedule", summary_body)
+        self.assertIn("add avionics", summary_body)
+        self.assertNotIn("10:30 to 12", summary_body)
+        self.assertNotIn("right now", summary_body)
+        self.assertNotIn("flight 117", summary_body)
+        self.assertIn("- Student: needs to drop meteorology in order to add avionics", output)
 
     def test_finalize_summary_output_model_first_backfills_detail_without_action_labeling(self):
         transcript = (

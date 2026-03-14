@@ -3,13 +3,6 @@ import os
 import sys
 from pathlib import Path
 
-try:
-    from faster_whisper import WhisperModel
-except Exception as e:
-    print(json.dumps({"event": "error", "msg": f"failed to import faster-whisper: {e}"}))
-    sys.exit(1)
-
-
 def send(obj: dict):
     print(json.dumps(obj), flush=True)
 
@@ -19,6 +12,11 @@ def default_whisper_root() -> str:
 
 
 def load_model(model_name: str):
+    try:
+        from faster_whisper import WhisperModel
+    except Exception as e:
+        raise RuntimeError(f"failed to import faster-whisper: {e}") from e
+
     download_root = os.environ.get("WHISPER_ROOT") or default_whisper_root()
     for device, compute_type in (("cuda", "float16"), ("cpu", "int8")):
         try:
@@ -40,6 +38,23 @@ def load_model(model_name: str):
     raise RuntimeError("unable to initialize faster-whisper on both cuda and cpu")
 
 
+def maybe_write_smoke_transcript(audio_path: str, transcript_out: str) -> bool:
+    if os.environ.get("MEETING_NOTES_SMOKE_MODE") != "1":
+        return False
+
+    smoke_text = os.environ.get("MEETING_NOTES_SMOKE_TRANSCRIPT_TEXT")
+    if smoke_text is None:
+        return False
+
+    text = smoke_text.strip()
+    send({"event": "ready"})
+    send({"event": "started", "out": audio_path, "transcript_out": transcript_out})
+    with open(transcript_out, "w", encoding="utf-8") as f:
+        f.write(text)
+    send({"event": "done", "out": transcript_out, "text": text})
+    return True
+
+
 def main():
     model_name = os.getenv("TRANSCRIBE_MODEL", "small.en")
     audio_path = os.getenv("TRANSCRIBE_AUDIO")
@@ -53,6 +68,9 @@ def main():
     if not transcript_out:
         transcript_out = os.path.join(os.path.dirname(audio_path), "transcript.txt")
     os.makedirs(os.path.dirname(transcript_out) or ".", exist_ok=True)
+
+    if maybe_write_smoke_transcript(audio_path, transcript_out):
+        return
 
     send({"event": "ready"})
     try:

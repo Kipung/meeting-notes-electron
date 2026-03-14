@@ -12,11 +12,11 @@ SECTION_MARKERS = (SUMMARY_MARKER, HIGH_IMPORTANCE_MARKER, ACTION_ITEMS_MARKER)
 SENTENCE_SPLIT_RE = re.compile(r"[^.!?\n]+[.!?]*")
 SENTENCE_BOUNDARY_RE = re.compile(r"(?<=[.!?])\s+|\n+")
 SPEAKER_PREFIX_RE = re.compile(
-    r"^\s*(?:\[[^\]]+\]\s*)?(?:speaker\s*\d+|[a-z][a-z0-9 _.'-]{0,30})\s*:\s*",
+    r"^\s*(?:\[[^\]]+\]\s*)?(?:speaker\s*\d+|[a-z][a-z _.'-]{0,30})\s*:\s*",
     re.IGNORECASE,
 )
 SPEAKER_CAPTURE_RE = re.compile(
-    r"^\s*(?:\[[^\]]+\]\s*)?([a-z][a-z0-9 _.'-]{0,30})\s*:\s*",
+    r"^\s*(?:\[[^\]]+\]\s*)?([a-z][a-z _.'-]{0,30})\s*:\s*",
     re.IGNORECASE,
 )
 LEADING_BULLET_RE = re.compile(r"^(?:[-*]|\u2022)\s*")
@@ -453,6 +453,7 @@ SUMMARY_DISALLOWED_PHRASES = (
     "needs to make sure the classes for spring are set up properly",
     "the student can take it in the spring as an online class",
     "that was this last semester",
+    "there would be no reason to",
 )
 SUMMARY_REQUEST_PREFIXES = (
     "can you ",
@@ -460,6 +461,37 @@ SUMMARY_REQUEST_PREFIXES = (
     "would you ",
     "let's ",
     "lets ",
+)
+WEAK_SUMMARY_OPENINGS = (
+    "the plan was to",
+    "the goal was to",
+)
+UNSUPPORTED_INFERENCE_PHRASES = (
+    "should already be",
+)
+AMBIGUOUS_SUMMARY_REFERENCE_RE = re.compile(
+    r"\b(?:it|that|this|the class|the course|the section)\s+"
+    r"(?:may|might|could|can|should)\s+(?:need to\s+be\s+|be\s+)?"
+    r"(?:taken|retaken|dropped|added|moved|scheduled|switched)\b",
+    re.IGNORECASE,
+)
+AMBIGUOUS_ACTION_REFERENCE_RE = re.compile(
+    r"\b(?:take|retake|drop|add|move|replace|switch|schedule)\s+(?:that|it)\b"
+    r"(?!\s+(?:section|course|class|lab|slot|option|one)\b)",
+    re.IGNORECASE,
+)
+OPTIONAL_SUMMARY_SUGGESTION_RE = re.compile(
+    r"\b(?:the student|the participant|the advisor|the coach)\s+(?:could|can)\s+"
+    r"(?:ask|check|contact|email|call|stop by|go|meet|reach out)\b",
+    re.IGNORECASE,
+)
+LOW_SIGNAL_COMPARISON_RE = re.compile(
+    r"^(?:neither|either)\s+of\s+(?:those|these)\s+(?:classes|courses|options)\b",
+    re.IGNORECASE,
+)
+TIME_RANGE_START_RE = re.compile(
+    r"^\d{1,2}(?::?\d{2})?\s*(?:to|-)\s*\d{1,2}(?::?\d{2})?\b",
+    re.IGNORECASE,
 )
 MONTH_PATTERN = r"(January|February|March|April|May|June|July|August|September|October|November|December)"
 
@@ -579,7 +611,6 @@ def _polish_text_snippet(text: str) -> str:
     polished = re.sub(r"\bare currently risk\b", "are currently at risk", polished, flags=re.IGNORECASE)
     polished = re.sub(r"\bis currently risk\b", "is currently at risk", polished, flags=re.IGNORECASE)
     polished = re.sub(r"\bcurrently risk\b", "currently at risk", polished, flags=re.IGNORECASE)
-    polished = re.sub(r"\bthe participant plans to take that in a different semester\b", "the class may need to be taken in a different semester", polished, flags=re.IGNORECASE)
     polished = re.sub(r"\bjust because of the time\b", "because of the schedule conflict", polished, flags=re.IGNORECASE)
     polished = re.sub(r"\bdid not finish last one\b", "did not complete previously", polished, flags=re.IGNORECASE)
     polished = re.sub(
@@ -592,6 +623,34 @@ def _polish_text_snippet(text: str) -> str:
     if polished and polished[0].islower():
         polished = polished[0].upper() + polished[1:]
     return _collapse_spaces(polished)
+
+
+def _has_weak_summary_inference(text: str) -> bool:
+    cleaned = _collapse_spaces(text or "")
+    if not cleaned:
+        return False
+    lowered = cleaned.lower()
+    if any(lowered.startswith(prefix) for prefix in WEAK_SUMMARY_OPENINGS):
+        return True
+    if any(phrase in lowered for phrase in UNSUPPORTED_INFERENCE_PHRASES):
+        return True
+    if OPTIONAL_SUMMARY_SUGGESTION_RE.search(cleaned):
+        return True
+    if LOW_SIGNAL_COMPARISON_RE.match(cleaned):
+        return True
+    if lowered.startswith(
+        (
+            "the student should be ",
+            "the participant should be ",
+            "the advisor should be ",
+            "the coach should be ",
+        )
+    ):
+        return True
+    for pattern in (AMBIGUOUS_SUMMARY_REFERENCE_RE, AMBIGUOUS_ACTION_REFERENCE_RE):
+        if pattern.search(cleaned):
+            return True
+    return False
 
 
 def _neutralize_summary_perspective(text: str) -> str:
@@ -622,6 +681,21 @@ def _format_action_item_text(text: str) -> str:
         return item
     if item[0].islower():
         item = item[0].upper() + item[1:]
+    role_subject_match = re.match(
+        r"^(?:The\s+)?(student|coach|advisor|tutor|instructor|professor)\s+"
+        r"(will|need(?:\s+to)?|needs(?:\s+to)?|should|must|have to|plan to|plans to|can)\s+(.+)$",
+        item,
+        flags=re.IGNORECASE,
+    )
+    if role_subject_match:
+        role = role_subject_match.group(1).title()
+        modal = role_subject_match.group(2).lower()
+        remainder = role_subject_match.group(3).strip()
+        if modal == "have to":
+            modal = "needs to"
+        elif modal == "plan to":
+            modal = "plans to"
+        item = f"{role}: {modal} {remainder}"
     lowered = item.lower()
     for role in ROLE_PREFIXES:
         role_with_space = f"{role} "
@@ -709,7 +783,7 @@ def _clean_summary_sentence(text: str) -> str:
     cleaned = _collapse_spaces(SPEAKER_PREFIX_RE.sub("", text or "")).strip()
     cleaned = re.sub(r"^Example\s+\d+\s*", "", cleaned, flags=re.IGNORECASE)
     cleaned = re.sub(r"^[—–-]+\s*", "", cleaned)
-    cleaned = re.sub(r"^(?:so|and|then|well|okay|ok|you know|um|uh)\s*,?\s*", "", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"^(?:oh(?:\s*,\s*so)?|so|and|then|well|okay|ok|you know|um|uh)\s*,?\s*", "", cleaned, flags=re.IGNORECASE)
     cleaned = re.sub(r"^yeah,\s*", "", cleaned, flags=re.IGNORECASE)
     cleaned = re.sub(r",\s*and then,?\s*yeah,?\s*", ", ", cleaned, flags=re.IGNORECASE)
     cleaned = re.sub(r"\bi['’]?m trying to\b", "the student wants to", cleaned, flags=re.IGNORECASE)
@@ -766,10 +840,6 @@ def _clean_summary_sentence(text: str) -> str:
     cleaned = re.sub(r"\byour schedule\b", "the student's schedule", cleaned, flags=re.IGNORECASE)
     cleaned = re.sub(r"\byour ([0-9]+ units)\b", r"the schedule remains \1", cleaned, flags=re.IGNORECASE)
     cleaned = re.sub(r"\bthis is your new schedule\b", "this is the new schedule", cleaned, flags=re.IGNORECASE)
-    cleaned = re.sub(r"^replace\s+", "The plan was to replace ", cleaned, flags=re.IGNORECASE)
-    cleaned = re.sub(r"^drop\s+", "The student needed to drop ", cleaned, flags=re.IGNORECASE)
-    cleaned = re.sub(r"^add\s+", "The student planned to add ", cleaned, flags=re.IGNORECASE)
-    cleaned = re.sub(r"^retake\s+", "The student planned to retake ", cleaned, flags=re.IGNORECASE)
     cleaned = re.sub(r"\bet\s*cetera\b.*$", "", cleaned, flags=re.IGNORECASE)
     cleaned = re.sub(r"\betc\.?.*$", "", cleaned, flags=re.IGNORECASE)
     cleaned = _neutralize_summary_perspective(cleaned)
@@ -820,10 +890,15 @@ def _is_raw_transcript_style_sentence(text: str) -> bool:
     lowered = _clean_summary_sentence(text).lower()
     if not lowered:
         return False
+    if TIME_RANGE_START_RE.match(lowered):
+        return True
     return lowered.startswith(
         (
             "it's actually",
             "now the student has",
+            "right now",
+            "that'd be",
+            "that would be",
             "the only thing left would be just",
             "because look",
             "that's the only other thing",
@@ -837,6 +912,7 @@ def _summary_contains_low_quality_transcript_phrasing(summary_body: str) -> bool
     return any(
         any(phrase in _clean_summary_sentence(sentence).lower() for phrase in SUMMARY_DISALLOWED_PHRASES)
         or _is_low_value_schedule_logistics_sentence(_clean_summary_sentence(sentence))
+        or _has_weak_summary_inference(sentence)
         or _is_raw_transcript_style_sentence(sentence)
         or bool(re.search(r"\b1 units\b", _clean_summary_sentence(sentence).lower()))
         for sentence in sentences
@@ -886,17 +962,7 @@ def _normalise_action_candidate(text: str) -> str:
 
 
 def _rewrite_advising_action_candidate(text: str) -> str:
-    cleaned = _collapse_spaces(text or "")
-    lowered = cleaned.lower()
-    if not cleaned:
-        return ""
-    if "send transcripts from the school where you took it" in lowered or "send transcripts from the school where the course was taken" in lowered:
-        return "Student: send the community college transcript for transfer credit evaluation"
-    if "decide on a concentration" in lowered:
-        return "Student: decide on a concentration so the remaining classes can be planned"
-    if "concentration isn't declared yet" in lowered:
-        return "Student: declare a concentration before graduation"
-    return cleaned
+    return _collapse_spaces(text or "")
 
 
 def _has_explicit_action_intent(text: str) -> bool:
@@ -918,7 +984,12 @@ def _has_explicit_action_intent(text: str) -> bool:
     return bool(ACTION_COMMITMENT_RE.match(candidate) or ACTION_BARE_MODAL_RE.match(candidate) or ACTION_IMPERATIVE_RE.match(candidate))
 
 
-def _is_bad_summary_sentence(sentence: str, transcript_words: Set[str]) -> bool:
+def _is_bad_summary_sentence(
+    sentence: str,
+    transcript_words: Set[str],
+    *,
+    require_transcript_support: bool = True,
+) -> bool:
     cleaned = _collapse_spaces(sentence)
     if not cleaned:
         return True
@@ -950,11 +1021,15 @@ def _is_bad_summary_sentence(sentence: str, transcript_words: Set[str]) -> bool:
     tokens = re.findall(r"[a-z']+", lowered)
     if tokens and tokens[-1] in ACTION_FRAGMENT_ENDINGS and len(tokens) <= 8:
         return True
+    if _is_raw_transcript_style_sentence(cleaned):
+        return True
     if _is_low_value_schedule_logistics_sentence(cleaned):
         return True
     if _contains_placeholder_phrase(cleaned):
         return True
-    if not _is_sentence_supported_by_transcript(cleaned, transcript_words):
+    if _has_weak_summary_inference(cleaned):
+        return True
+    if require_transcript_support and not _is_sentence_supported_by_transcript(cleaned, transcript_words):
         return True
     return False
 
@@ -964,9 +1039,21 @@ def _is_good_model_summary_sentence(
     transcript_words: Set[str],
     transcript_sentences: Sequence[str],
 ) -> bool:
-    if _is_bad_summary_sentence(sentence, transcript_words):
+    if _is_bad_summary_sentence(sentence, transcript_words, require_transcript_support=False):
         return False
-    return _max_sentence_similarity(sentence, transcript_sentences) >= 0.4
+    cleaned = _clean_summary_sentence(sentence)
+    similarity = _max_sentence_similarity(cleaned, transcript_sentences)
+    if _looks_like_keyword_soup_sentence(cleaned, similarity):
+        return False
+    if similarity >= 0.4:
+        return True
+    if _contains_trigger(cleaned, HIGH_IMPORTANCE_SCORE_TRIGGERS):
+        return True
+    if _contains_trigger(cleaned, DECISION_SIGNAL_TRIGGERS):
+        return True
+    words = _content_word_set(cleaned)
+    overlap = len(words & transcript_words)
+    return overlap >= 4 or (overlap >= 3 and len(words) <= 8)
 
 
 def _score_summary_candidate(sentence: str) -> int:
@@ -982,7 +1069,11 @@ def _score_summary_candidate(sentence: str) -> int:
         score += 2
     if _contains_trigger(cleaned, LOW_PRIORITY_CONTEXT_TRIGGERS):
         score -= 1
+    if _is_low_value_backfill_sentence(cleaned):
+        score -= 2
     if _is_low_value_schedule_logistics_sentence(cleaned):
+        score -= 3
+    if _has_weak_summary_inference(cleaned):
         score -= 3
     lowered = cleaned.lower()
     if "student" in lowered or "coach" in lowered:
@@ -1001,50 +1092,24 @@ def _is_advising_transcript(transcript: str) -> bool:
 
 def _rewrite_advising_summary_sentence(sentence: str) -> str:
     cleaned = _collapse_spaces(sentence)
-    lowered = cleaned.lower()
     if not cleaned:
         return ""
-    if "the student wants to get one more class" in lowered and "full time" in lowered:
-        return "The student wanted to add one more class to reach full-time status."
-    if "the student needs help with registering for spring" in lowered and "transfer credit" in lowered:
-        return "The student needed help finalizing spring registration and confirming that community college transfer credit would count."
-    if "the student needs to make sure the classes for spring are set up properly" in lowered:
-        return "The student wanted to confirm that the spring schedule was set up correctly."
-    if "it keeps the degree plan on course" in lowered:
-        return "The student wanted to confirm that the planned spring classes keep the degree plan on course."
-    if "either one would fulfill the requirement" in lowered and ("old testament" in lowered or "new testament" in lowered):
-        return "Either Old or New Testament survey would satisfy the remaining Christian studies requirement."
-    if "three total by the time you graduate" in lowered and "christian studies" in lowered:
-        return "The student needs three Christian studies courses by graduation."
-    units_match = re.search(r"\b(?:will be at|has)\s+(\d+)\s+units\b", lowered)
-    if units_match:
-        units = units_match.group(1)
-        if "118" in lowered:
-            return f"Once Flight 118 is added mid-semester, the student will be at {units} units."
-        if "five classes" in lowered:
-            return f"The spring schedule totals {units} units across five classes."
-        return f"The updated schedule brings the student to {units} units."
-    classes_match = re.search(r"\b(\d+)\s+units,\s+([a-z]+)\s+classes\b", lowered)
-    if classes_match:
-        units = classes_match.group(1)
-        class_count = classes_match.group(2)
-        return f"The spring schedule totals {units} units across {class_count} classes."
-    if "concentration isn't declared yet" in lowered:
-        return "The student still needs to declare a concentration before graduation."
-    if "decide on a concentration" in lowered:
-        return "The student needs to decide on a concentration soon so the remaining classes can be planned."
-    if "flight operations concentration" in lowered:
-        return "The spring schedule was aligned with the flight operations concentration."
-    if "send transcripts from the school where the course was taken" in lowered:
-        return "The student still needs to send the community college transcript so the transfer credit can be evaluated."
-    if "need to get to 124 after completing all these courses" in lowered:
-        return "After the current schedule, the student still needs to reach 124 total units."
-    if "only thing left would be just the uas and then crm" in lowered:
-        return "After spring, the remaining concentration courses are UAS and CRM."
-    if "drop meteorology in order to add avionics" in lowered:
-        return "The student needs to drop meteorology to add modern avionics."
-    if "should be on a wait list" in lowered:
-        return "The student should already be on the wait list for the required flight lab."
+    for verb, gerund in (
+        ("replace", "replacing"),
+        ("drop", "dropping"),
+        ("add", "adding"),
+        ("retake", "retaking"),
+        ("take", "taking"),
+        ("move", "moving"),
+        ("switch", "switching"),
+        ("declare", "declaring"),
+        ("register", "registering for"),
+    ):
+        prefix = f"{verb} "
+        if cleaned.lower().startswith(prefix):
+            remainder = cleaned[len(prefix):].strip()
+            if remainder:
+                return f"The discussion focused on {gerund} {remainder}"
     return cleaned
 
 
@@ -1572,6 +1637,10 @@ def _summary_body_quality_score(summary_body: str, transcript: str) -> float:
             score -= 2.0
         if _contains_placeholder_phrase(cleaned):
             score -= 2.0
+        if _has_weak_summary_inference(cleaned):
+            score -= 2.0
+        if _is_raw_transcript_style_sentence(cleaned):
+            score -= 2.5
         if re.search(r"\b(i|me|my|mine|we|our|ours|us|you|your|yours)\b", lowered):
             score -= 1.5
         if any(phrase in lowered for phrase in SUMMARY_DISALLOWED_PHRASES):
@@ -1583,6 +1652,148 @@ def _summary_body_quality_score(summary_body: str, transcript: str) -> float:
         else:
             accepted.append(cleaned)
     return score
+
+
+def _summary_sentence_duplicates_actions(sentence: str, action_bullets: Sequence[str]) -> bool:
+    cleaned_sentence = _clean_summary_sentence(sentence)
+    if not cleaned_sentence or not action_bullets:
+        return False
+    action_references = [_clean_candidate(bullet[2:] if bullet.startswith("- ") else bullet) for bullet in action_bullets]
+    action_references = [reference for reference in action_references if reference]
+    if not action_references:
+        return False
+    return _max_sentence_similarity(cleaned_sentence, action_references) >= 0.78
+
+
+def _looks_like_keyword_soup_sentence(text: str, similarity: float | None = None) -> bool:
+    cleaned = _clean_summary_sentence(text)
+    if not cleaned:
+        return False
+    lowered = cleaned.lower()
+    if len(cleaned.split()) < 14:
+        return False
+    if similarity is None:
+        similarity = 0.0
+    if similarity >= 0.35:
+        return False
+    keyword_hits = len(
+        re.findall(
+            r"\b(?:need(?:s)? to|will|submit|update|schedule(?:d)?|review(?:'s)?|check|confirm|email|send|"
+            r"follow up|follow-up|attend|drop|add|replace|retake|deadline|priority|risk|urgent|critical)\b",
+            lowered,
+        )
+    )
+    return keyword_hits >= 4
+
+
+def _is_low_value_backfill_sentence(text: str) -> bool:
+    lowered = _clean_summary_sentence(text).lower()
+    if not lowered:
+        return False
+    if not lowered.startswith(
+        (
+            "the team reviewed",
+            "the team discussed",
+            "the advisor and student reviewed",
+            "the student and coach discussed",
+            "the session focused on",
+            "the discussion focused on",
+            "the meeting focused on",
+            "they reviewed",
+            "they discussed",
+        )
+    ):
+        return False
+    if _contains_trigger(
+        lowered,
+        (
+            "drop",
+            "add",
+            "replace",
+            "email",
+            "send",
+            "submit",
+            "confirm",
+            "check",
+            "follow up",
+            "follow-up",
+            "register",
+            "attend",
+            "complete",
+        ),
+    ):
+        return False
+    if _contains_trigger(lowered, HIGH_IMPORTANCE_SCORE_TRIGGERS):
+        return False
+    return True
+
+
+def _dedupe_summary_against_actions(summary_body: str, transcript: str, action_bullets: Sequence[str]) -> str:
+    if not summary_body or not action_bullets:
+        return summary_body
+    original_sentences = [sentence for sentence in split_sentences(summary_body) if sentence.strip()]
+    if len(original_sentences) < 2:
+        return summary_body
+
+    scored_original = [
+        (
+            sentence,
+            _score_summary_candidate(_clean_summary_sentence(sentence)),
+            _summary_sentence_duplicates_actions(sentence, action_bullets),
+        )
+        for sentence in original_sentences
+    ]
+    max_non_duplicate_score = max(
+        (score for _sentence, score, duplicates_action in scored_original if not duplicates_action),
+        default=float("-inf"),
+    )
+    has_non_duplicate_followup = any(
+        _contains_trigger(_clean_summary_sentence(sentence), ACTION_CONTENT_TRIGGERS)
+        for sentence, _score, duplicates_action in scored_original
+        if not duplicates_action
+    )
+
+    kept: List[str] = []
+    removed_any = False
+    for sentence, score, duplicates_action in scored_original:
+        if duplicates_action and has_non_duplicate_followup and max_non_duplicate_score >= score - 2:
+            removed_any = True
+            continue
+        kept.append(sentence)
+
+    if not removed_any:
+        return summary_body
+
+    transcript_words = _content_word_set(transcript)
+    target_count = min(MAX_SUMMARY_SENTENCES, max(MIN_SUMMARY_SENTENCES, len(original_sentences)))
+    for _score, raw_sentence in sorted(
+        ((_score_summary_candidate(sentence), sentence) for sentence in split_sentences(transcript)),
+        key=lambda item: item[0],
+        reverse=True,
+    ):
+        if len(kept) >= target_count:
+            break
+        cleaned = _clean_summary_sentence(raw_sentence)
+        if not cleaned:
+            continue
+        cleaned = _trim_words(cleaned, MAX_SUMMARY_SENTENCE_WORDS)
+        if _is_bad_summary_sentence(cleaned, transcript_words):
+            continue
+        if _is_redundant_sentence(cleaned, kept):
+            continue
+        if _summary_sentence_duplicates_actions(cleaned, action_bullets):
+            continue
+        kept.append(cleaned)
+
+    if not kept:
+        kept = original_sentences[:1]
+
+    polished = [
+        _ensure_sentence_ending(_trim_words(_polish_text_snippet(_clean_summary_sentence(sentence)), MAX_SUMMARY_SENTENCE_WORDS))
+        for sentence in kept[:MAX_SUMMARY_SENTENCES]
+        if sentence.strip()
+    ]
+    return " ".join(polished).strip() if polished else summary_body
 
 
 def _build_extractive_summary_body(transcript: str) -> str:
@@ -1653,7 +1864,13 @@ def _build_extractive_summary_body(transcript: str) -> str:
     return extractive_body
 
 
-def _expand_summary_with_transcript_details(summary_body: str, transcript: str) -> str:
+def _expand_summary_with_transcript_details(
+    summary_body: str,
+    transcript: str,
+    *,
+    target_sentence_count: int = TARGET_SUMMARY_SENTENCES,
+    target_word_count: int = TARGET_SUMMARY_WORDS,
+) -> str:
     if not summary_body or summary_body == "Not enough content to summarize.":
         return summary_body
 
@@ -1669,7 +1886,9 @@ def _expand_summary_with_transcript_details(summary_body: str, transcript: str) 
 
     if not expanded:
         return summary_body
-    if len(expanded) >= TARGET_SUMMARY_SENTENCES and len(" ".join(expanded).split()) >= TARGET_SUMMARY_WORDS:
+    if len(expanded) >= target_sentence_count and (
+        target_word_count <= 0 or len(" ".join(expanded).split()) >= target_word_count
+    ):
         return " ".join(expanded).strip()
 
     extractive_body = _build_extractive_summary_body(transcript)
@@ -1681,15 +1900,26 @@ def _expand_summary_with_transcript_details(summary_body: str, transcript: str) 
         if not cleaned:
             continue
         polished = _ensure_sentence_ending(_trim_words(_polish_text_snippet(cleaned), MAX_SUMMARY_SENTENCE_WORDS))
+        if expanded and _is_low_value_backfill_sentence(polished):
+            continue
         if _is_redundant_sentence(polished, expanded):
             continue
         expanded.append(polished)
         if len(expanded) >= MAX_SUMMARY_SENTENCES:
             break
-        if len(expanded) >= TARGET_SUMMARY_SENTENCES and len(" ".join(expanded).split()) >= TARGET_SUMMARY_WORDS:
+        if len(expanded) >= target_sentence_count and (
+            target_word_count <= 0 or len(" ".join(expanded).split()) >= target_word_count
+        ):
             break
 
     return " ".join(expanded[:MAX_SUMMARY_SENTENCES]).strip()
+
+
+def _backfill_summary_from_transcript(summary_body: str, transcript: str, action_bullets: Sequence[str] = ()) -> str:
+    expanded = _expand_summary_with_transcript_details(summary_body, transcript)
+    if action_bullets:
+        expanded = _dedupe_summary_against_actions(expanded, transcript, action_bullets)
+    return expanded
 
 
 def _fallback_model_summary_only(summary_body: str, transcript: str = "") -> str:
@@ -1782,6 +2012,7 @@ def finalize_summary_output(summary: str, transcript: str) -> str:
             transcript_sentences,
             MAX_ACTION_ITEMS,
         )
+    summary_body = _backfill_summary_from_transcript(summary_body, transcript, action_bullets)
     summary_body = _enrich_summary_with_actions(summary_body, action_bullets)
 
     lines = [SUMMARY_MARKER, summary_body, ""]
@@ -1815,8 +2046,8 @@ def finalize_summary_output_model_first(summary: str, transcript: str) -> str:
     )
     extractive_summary_body = _build_extractive_summary_body(transcript)
     candidate_summaries = {
-        "model": _expand_summary_with_transcript_details(model_summary_body, transcript),
-        "grounded": _expand_summary_with_transcript_details(grounded_summary_body, transcript),
+        "model": model_summary_body,
+        "grounded": grounded_summary_body,
         "extractive": extractive_summary_body,
     }
     candidate_scores = {
@@ -1824,18 +2055,12 @@ def finalize_summary_output_model_first(summary: str, transcript: str) -> str:
         for name, body in candidate_summaries.items()
     }
     summary_body = candidate_summaries["model"]
-    forced_extractive = False
-    if _is_advising_transcript(transcript):
-        extractive_body = candidate_summaries["extractive"]
-        if extractive_body != "Not enough content to summarize." and not _summary_contains_low_quality_transcript_phrasing(extractive_body):
-            summary_body = extractive_body
-            forced_extractive = True
-    best_name = max(candidate_scores, key=candidate_scores.get)
-    if not forced_extractive and best_name != "model" and candidate_scores[best_name] > candidate_scores["model"] + 1.0:
-        summary_body = candidate_summaries[best_name]
-    if summary_body == "Not enough content to summarize.":
+    best_non_extractive = max(("model", "grounded"), key=candidate_scores.get)
+    if best_non_extractive != "model" and candidate_scores[best_non_extractive] > candidate_scores["model"] + 1.0:
+        summary_body = candidate_summaries[best_non_extractive]
+    if summary_body == "Not enough content to summarize." or _summary_contains_low_quality_transcript_phrasing(summary_body):
         summary_body = candidate_summaries["grounded"]
-    if summary_body == "Not enough content to summarize.":
+    if summary_body == "Not enough content to summarize." or _summary_contains_low_quality_transcript_phrasing(summary_body):
         summary_body = candidate_summaries["extractive"]
     if summary_body == "Not enough content to summarize.":
         summary_body = _fallback_model_summary_only(sections.get(SUMMARY_MARKER, ""), transcript)
@@ -1857,7 +2082,13 @@ def finalize_summary_output_model_first(summary: str, transcript: str) -> str:
                 transcript_sentences,
             )
         ]
-    if count_summary_sentences(f"{SUMMARY_MARKER}\n{summary_body}") < TARGET_SUMMARY_SENTENCES and action_bullets:
+    summary_body = _expand_summary_with_transcript_details(
+        summary_body,
+        transcript,
+        target_sentence_count=MIN_SUMMARY_SENTENCES,
+        target_word_count=0,
+    )
+    if count_summary_sentences(f"{SUMMARY_MARKER}\n{summary_body}") < MIN_SUMMARY_SENTENCES and action_bullets:
         summary_body = _enrich_summary_with_actions(summary_body, action_bullets)
 
     lines = [SUMMARY_MARKER, summary_body, ""]
@@ -1923,7 +2154,7 @@ def finalize_summary_output_explicit_actions(summary: str, transcript: str) -> s
         transcript_sentences,
         MAX_ACTION_ITEMS,
     )
-    summary_body = _enrich_summary_with_actions(summary_body, action_bullets)
+    summary_body = _backfill_summary_from_transcript(summary_body, transcript, action_bullets)
 
     lines = [SUMMARY_MARKER, summary_body, ""]
     if action_bullets:

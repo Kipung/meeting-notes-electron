@@ -18,10 +18,12 @@ except ImportError:
 try:
     from llama_cpp import Llama
 except Exception as e:
+    LLAMA_IMPORT_ERROR = str(e)
     Llama = None  # type: ignore[assignment]
-    print(json.dumps({"event": "error", "msg": f"failed to import llama_cpp: {e}"}))
     # Do not exit; allow the daemon to run without Llama for testing purposes
     # sys.exit(1)
+else:
+    LLAMA_IMPORT_ERROR = None
 
 try:
     from transformers import AutoModelForSeq2SeqLM, AutoTokenizer
@@ -112,12 +114,14 @@ SUMMARY_OUTPUT_FORMAT = (
 
 DEFAULT_PROMPT = (
     "You are a meeting notes summarizer.\n"
-    "Read the transcript and summarize the main point of the meeting.\n"
+    "Read the meeting content and summarize the main point of the meeting.\n"
     "Explain the core situation, the key decisions or outcomes, and any concrete follow-up that was actually discussed.\n"
     "Highlight the most important takeaways, blockers, and deadlines when they are clearly present.\n"
     "If the transcript includes uncertainty or competing options, reflect that instead of forcing certainty.\n"
     "If the meeting explores multiple options, summarize the final outcome rather than the first idea mentioned.\n"
-    "Use only information stated in the transcript.\n"
+    "Prefer concrete nouns and entities already named in the meeting content over generic references like it, that, the class, or the course.\n"
+    "Do not turn tentative suggestions, scheduling possibilities, or follow-up checks into confirmed outcomes.\n"
+    "Use only information stated in the provided content.\n"
     "Do not invent facts, names, roles, or action items.\n"
     "Keep the wording natural, specific, and concise.\n"
     + SUMMARY_OUTPUT_FORMAT
@@ -136,6 +140,24 @@ CHUNK_SUMMARY_PROMPT = (
     "If the chunk contains a correction or revised plan, keep the latest outcome.\n"
     "Do not include headings, bullets, or an Action Items section.\n"
     "If content is insufficient, output exactly: Not enough content to summarize.\n"
+)
+SUMMARY_METADATA_FIELDS = (
+    ("modality", "Modality"),
+    ("subject", "Subject"),
+    ("student_id", "Student ID"),
+    ("student_name", "Student Name"),
+    ("coach", "Coach"),
+)
+SUMMARY_PROMPT_METADATA_FIELDS = tuple(
+    (key, label) for key, label in SUMMARY_METADATA_FIELDS if key != "student_id"
+)
+FINAL_METADATA_PROMPT_GUIDANCE = (
+    "Session metadata may be provided as supporting context ahead of the meeting content.\n"
+    "Use metadata only when it helps frame the session and does not conflict with the meeting content.\n"
+    "Do not treat metadata as spoken dialogue, and do not invent details from metadata alone.\n"
+    "If modality or subject is provided and consistent with the meeting content, use it to frame the opening sentence so the summary is clearly grounded.\n"
+    "If a student name is provided, use it at most once when it improves clarity.\n"
+    "Do not include a student ID unless it is necessary for clarity.\n"
 )
 
 SHORT_TRANSCRIPT_SUMMARY = (
@@ -224,6 +246,109 @@ def estimate_direct_summary_word_limit(n_ctx: int, max_tokens: int) -> int:
         return 0
     available_prompt_tokens = max(n_ctx - max_tokens - DIRECT_SUMMARY_TOKEN_MARGIN, 0)
     return max(0, int(available_prompt_tokens * DIRECT_SUMMARY_WORDS_PER_TOKEN))
+
+
+def normalize_summary_metadata_value(value: object) -> str:
+    if value is None:
+        return ""
+    return re.sub(r"\s+", " ", str(value)).strip()
+
+
+def collect_summary_metadata(context: Optional[dict]) -> dict[str, str]:
+    metadata: dict[str, str] = {}
+    if context:
+        for key, _label in SUMMARY_METADATA_FIELDS:
+            normalized = normalize_summary_metadata_value(context.get(key))
+            if normalized:
+                metadata[key] = normalized
+    env_map = {
+        "modality": os.getenv("MODALITY"),
+        "subject": os.getenv("SUBJECT"),
+        "student_id": os.getenv("STUDENT_ID"),
+        "student_name": os.getenv("STUDENT_NAME"),
+        "coach": os.getenv("COACH"),
+    }
+    for key, raw_value in env_map.items():
+        normalized = normalize_summary_metadata_value(raw_value)
+        if normalized and key not in metadata:
+            metadata[key] = normalized
+    return metadata
+
+
+def build_final_summary_prompt(metadata: dict[str, str]) -> str:
+    if not metadata:
+        return DEFAULT_PROMPT
+    return DEFAULT_PROMPT + FINAL_METADATA_PROMPT_GUIDANCE
+
+
+def build_final_summary_input(content: str, metadata: dict[str, str]) -> str:
+    cleaned_content = (content or "").strip()
+    if not metadata:
+        return cleaned_content
+    lines = ["Session metadata (supporting context):"]
+    for key, label in SUMMARY_PROMPT_METADATA_FIELDS:
+        value = metadata.get(key)
+        if value:
+            lines.append(f"- {label}: {value}")
+    if cleaned_content:
+        lines.extend(["", "Meeting content:", cleaned_content])
+    return "\n".join(lines).strip()
+
+
+def summary_body_mentions_metadata(summary_body: str, metadata: dict[str, str]) -> bool:
+    lowered = (summary_body or "").lower()
+    for key in ("subject", "modality"):
+        value = metadata.get(key, "")
+        if value and value.lower() in lowered:
+            return True
+    return False
+
+
+def build_summary_metadata_frame(metadata: dict[str, str]) -> str:
+    subject = metadata.get("subject", "")
+    modality = metadata.get("modality", "")
+    if subject and modality:
+        return f"During the {modality} about {subject}, "
+    if subject:
+        return f"Regarding {subject}, "
+    if modality:
+        return f"During the {modality}, "
+    return ""
+
+
+def prepend_summary_metadata_frame(frame: str, summary_body: str) -> str:
+    body = (summary_body or "").strip()
+    if body.startswith(("The meeting", "The session", "This meeting", "This session")):
+        body = body[0].lower() + body[1:]
+    return f"{frame}{body}"
+
+
+def inject_summary_metadata_context(summary: str, metadata: dict[str, str]) -> str:
+    normalized = (summary or "").strip()
+    if not normalized or "Not enough content to summarize." in normalized:
+        return summary
+    if not metadata:
+        return summary
+    frame = build_summary_metadata_frame(metadata)
+    if not frame:
+        return summary
+
+    if "Summary:" not in normalized:
+        return normalized if summary_body_mentions_metadata(normalized, metadata) else prepend_summary_metadata_frame(frame, normalized)
+
+    summary_part, has_action_items, action_part = normalized.partition("Action Items:")
+    summary_body = re.sub(r"(?is)^\s*Summary:\s*", "", summary_part).strip()
+    if not summary_body or summary_body_mentions_metadata(summary_body, metadata):
+        return summary
+    if not has_action_items:
+        return f"Summary:\n{prepend_summary_metadata_frame(frame, summary_body)}"
+
+    action_body = action_part.strip()
+    action_separator = "\n" if action_body.startswith("-") else " "
+    return (
+        f"Summary:\n{prepend_summary_metadata_frame(frame, summary_body)}"
+        f"\n\nAction Items:{action_separator}{action_body}"
+    )
 
 FOLLOWUP_PROMPT = (
     "You are an assistant that drafts a warm, professional follow-up email after a student support session.\n"
@@ -357,8 +482,9 @@ def summarize_with_llm(
     max_tokens: int = 1024,
     on_delta: Optional[Callable[[str], None]] = None,
     task: str = "final",
+    input_heading: str = "Transcript",
 ) -> str:
-    full_prompt = prompt + "\n\nTranscript:\n" + text + "\n\nSummary:\n"
+    full_prompt = prompt + f"\n\n{input_heading}:\n" + text + "\n\nSummary:\n"
     model_input = full_prompt
     if hasattr(client, "build_input"):
         model_input = client.build_input(text=text, prompt=prompt, task=task)
@@ -473,10 +599,20 @@ def summarize_direct(
     task: str = "final",
     on_progress: Optional[Callable[[str], None]] = None,
     on_stream: Optional[Callable[[str], None]] = None,
+    prompt: str = DEFAULT_PROMPT,
+    input_heading: str = "Transcript",
 ) -> str:
     if on_progress:
         on_progress("summarizing transcript")
-    return summarize_with_llm(client, text, DEFAULT_PROMPT, max_tokens=max_tokens, on_delta=on_stream, task=task)
+    return summarize_with_llm(
+        client,
+        text,
+        prompt,
+        max_tokens=max_tokens,
+        on_delta=on_stream,
+        task=task,
+        input_heading=input_heading,
+    )
 
 
 class Seq2SeqClient:
@@ -575,7 +711,8 @@ def is_seq2seq_model_dir(model_path: str) -> bool:
 
 def create_llama(model_path: str, n_ctx: int):
     if Llama is None:
-        raise RuntimeError("llama_cpp is not available in this Python environment")
+        detail = f": {LLAMA_IMPORT_ERROR}" if LLAMA_IMPORT_ERROR else ""
+        raise RuntimeError(f"llama_cpp is not available in this Python environment{detail}")
     try:
         return Llama(model_path=model_path, n_ctx=n_ctx)
     except TypeError:
@@ -616,30 +753,8 @@ class SummarizerDaemon:
                 self.send({"event": "error", "msg": "model not loaded", "out": out_path})
                 return
             self.send({"event": "summary_start", "out": out_path, "context": context})
-            # Prepend metadata if provided in context or environment variables
-            meta_prefix = ""
-            meta_lines = []
-            # First, from the context dict (if any)
-            if context:
-                for key in ["modality", "subject", "student_id", "student_name", "coach"]:
-                    if key in context and context[key]:
-                        meta_lines.append(f"{key.replace('_', ' ').title()}: {context[key]}")
-            # Then, fall back to environment variables (e.g., MODALITY, SUBJECT, etc.)
-            env_map = {
-                "modality": os.getenv("MODALITY"),
-                "subject": os.getenv("SUBJECT"),
-                "student_id": os.getenv("STUDENT_ID"),
-                "student_name": os.getenv("STUDENT_NAME"),
-                "coach": os.getenv("COACH"),
-            }
-            for key, val in env_map.items():
-                if val:
-                    line = f"{key.replace('_', ' ').title()}: {val}"
-                    if line not in meta_lines:
-                        meta_lines.append(line)
-            if meta_lines:
-                meta_prefix = "\n".join(meta_lines) + "\n\n"
             context_type = context.get("type") if context else None
+            summary_metadata = collect_summary_metadata(context)
             raw_source_transcript = ""
             if context and isinstance(context.get("sourceTranscript"), str):
                 raw_source_transcript = context.get("sourceTranscript", "")
@@ -651,11 +766,12 @@ class SummarizerDaemon:
                 normalized_text = normalize_transcript_for_summary(text)
             if not normalized_text:
                 normalized_text = text
-            combined_text = meta_prefix + normalized_text
             grounding_text = normalize_transcript_for_summary(raw_source_transcript) if raw_source_transcript else normalized_text
             if not grounding_text:
                 grounding_text = normalized_text
-            word_count = count_words(combined_text)
+            final_prompt = build_final_summary_prompt(summary_metadata)
+            final_input_text = build_final_summary_input(normalized_text, summary_metadata)
+            word_count = count_words(normalized_text)
 
             if word_count < self.min_words:
                 msg = f"transcript too short ({word_count} words); skipping summary"
@@ -685,7 +801,7 @@ class SummarizerDaemon:
                 try:
                     chunk_summary = summarize_with_llm(
                         self.client,
-                        combined_text,
+                        normalized_text,
                         CHUNK_SUMMARY_PROMPT,
                         max_tokens=chunk_max_tokens,
                         task="chunk",
@@ -707,7 +823,6 @@ class SummarizerDaemon:
                         return
                 self.send({"event": "done", "out": out_path, "text": summary, "secs": dur, "context": context})
                 return
-            final_input_text = combined_text
             should_skip_backend_chunking = use_prepared_final_input
             if not should_skip_backend_chunking and not is_seq2seq:
                 direct_word_limit = estimate_direct_summary_word_limit(self.n_ctx, final_max_tokens)
@@ -754,7 +869,7 @@ class SummarizerDaemon:
                             f"Chunk {i + 1} summary:\n{chunk_summary}"
                             for i, chunk_summary in enumerate(reduced_chunk_summaries)
                         )
-                    final_input_text = meta_prefix + aggregated
+                    final_input_text = build_final_summary_input(aggregated, summary_metadata)
             try:
                 summary = summarize_direct(
                     self.client,
@@ -763,6 +878,8 @@ class SummarizerDaemon:
                     task="final",
                     on_progress=lambda msg: self.send({"event": "progress", "msg": msg, "context": context}),
                     on_stream=lambda delta: self.send({"event": "summary_delta", "text": delta, "out": out_path, "context": context}),
+                    prompt=final_prompt,
+                    input_heading="Meeting Content",
                 )
             except Exception as e:
                 self.send({"event": "error", "msg": f"summarization error: {e}", "out": out_path, "context": context})
@@ -770,6 +887,8 @@ class SummarizerDaemon:
             if bool_from_env("SUM_STRICT_FORMAT", True):
                 summary_for_formatting = summary if "Summary:" in summary else f"Summary:\n{summary}"
                 summary = finalize_summary_output_model_first(summary_for_formatting, grounding_text)
+            if context_type == "final":
+                summary = inject_summary_metadata_context(summary, summary_metadata)
             dur = time.time() - start
             if out_path:
                 try:

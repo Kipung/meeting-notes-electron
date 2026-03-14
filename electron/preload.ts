@@ -16,6 +16,7 @@ const backendApi: BackendApi = {
   listDevices: () => ipcRenderer.invoke('list-devices'),
   getSessionsRoot: () => ipcRenderer.invoke('get-sessions-root'),
   chooseSessionsRoot: () => ipcRenderer.invoke('choose-sessions-root'),
+  setSessionMetadata: (metadata) => ipcRenderer.invoke('set-session-metadata', metadata),
   deleteSessionAudio: (sessionDir: string) => ipcRenderer.invoke('delete-session-audio', sessionDir),
   generateFollowUpEmail: (payload) => ipcRenderer.invoke('generate-followup-email', payload),
   onSession: (cb) => onChannel('session-started', cb),
@@ -28,10 +29,10 @@ const backendApi: BackendApi = {
   onSummaryStatus: (cb) => onChannel('summary-status', cb),
   onSummaryStream: (cb) => onChannel('summary-stream', cb),
   onBootstrapStatus: (cb) => onChannel('bootstrap-status', cb),
-  processRecording: () => ipcRenderer.invoke('process-recording'),
-  processTranscriptFile: () => ipcRenderer.invoke('process-transcript-file'),
-  summarizeTranscriptText: (text: string) => ipcRenderer.invoke('summarize-transcript-text', { text }),
-  processInputPath: (inputPath: string) => ipcRenderer.invoke('process-input-path', inputPath),
+  processRecording: (payload) => ipcRenderer.invoke('process-recording', payload || {}),
+  processTranscriptFile: (payload) => ipcRenderer.invoke('process-transcript-file', payload || {}),
+  summarizeTranscriptText: (payload) => ipcRenderer.invoke('summarize-transcript-text', payload),
+  processInputPath: (payload) => ipcRenderer.invoke('process-input-path', payload),
 }
 
 contextBridge.exposeInMainWorld('backend', backendApi)

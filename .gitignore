@@ -24,6 +24,7 @@ ffmpeg/*
 !ffmpeg/.gitkeep
 lib/*
 !lib/.gitkeep
+torch_cache/
 sessions/
 release/
 runtime_unpack/
