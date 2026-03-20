@@ -202,7 +202,7 @@ export class SummaryOrchestrator {
   }
 
   private maybeStartPendingFinalSummary(args: SummaryOperationArgs): void {
-    if (!this.finalSummaryPending) return
+    if (this.finalSummaryPending === null || this.finalSummaryPending === undefined) return
     if (this.chunkProcessing || this.chunkQueue.length > 0) return
     const text = this.finalSummaryPending
     this.finalSummaryPending = null

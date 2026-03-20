@@ -391,6 +391,22 @@ function App() {
       setFollowUpGenerating(false)
     })
 
+    const offSummaryStream = backend.onSummaryStream((_ev, data) => {
+      if (data.reset) {
+        setSummary('')
+        setFollowUpEmail('')
+        setFollowUpStatus('')
+        setFollowUpGenerating(false)
+      }
+      const delta = data.delta || ''
+      if (delta) {
+        setStatus('summarizing')
+        setStatusDetail('writing final summary...')
+        setSummarizationState('running')
+        setSummary((prev) => prev + delta)
+      }
+    })
+
     const offSummaryStatus = backend.onSummaryStatus((_ev, data) => {
       const state = data.state === 'starting' || data.state === 'running' ? 'running' : data.state === 'done' ? 'done' : data.state === 'error' ? 'error' : 'idle'
       setSummarizationState(state)
@@ -422,6 +438,7 @@ function App() {
       offRecordingReady()
       offRecordingStarted()
       offSummary()
+      offSummaryStream()
       offSummaryStatus()
       offBootstrapStatus()
     }

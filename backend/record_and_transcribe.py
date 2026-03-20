@@ -16,6 +16,22 @@ if sys.platform == "win32":
 else:
     import pyaudio
 from faster_whisper import WhisperModel
+try:
+    from backend.recording_vad_utils import (
+        frames_for_ms,
+        positive_int_from_env,
+        samples_for_ms,
+        should_force_flush_utterance,
+        take_post_pad_frames,
+    )
+except ImportError:
+    from recording_vad_utils import (  # type: ignore[no-redef]
+        frames_for_ms,
+        positive_int_from_env,
+        samples_for_ms,
+        should_force_flush_utterance,
+        take_post_pad_frames,
+    )
 
 
 TARGET_RATE = 16000
@@ -26,6 +42,7 @@ VAD_MIN_SILENCE_MS = 600
 VAD_MIN_SPEECH_MS = 200
 VAD_PRE_PAD_MS = 200
 VAD_POST_PAD_MS = 200
+VAD_MAX_UTTERANCE_MS = 8000
 
 
 class SessionState:
@@ -164,6 +181,16 @@ def _default_whisper_root() -> str:
 
 
 def _vad_load():
+    # Prefer the silero-vad Python package (bundled torch model, reliable across runtimes).
+    try:
+        from silero_vad import load_silero_vad
+        model = load_silero_vad()
+        print("[vad] loaded silero-vad package model", file=sys.stderr, flush=True)
+        return model
+    except Exception as e:
+        print(f"[vad] silero-vad package unavailable, falling back to onnx: {e}", file=sys.stderr, flush=True)
+
+    # Fall back to ONNX file.
     model_path = os.environ.get("SILERO_VAD_MODEL") or _default_vad_model_path()
     if not os.path.exists(model_path):
         print(f"[vad] silero onnx model not found: {model_path}", file=sys.stderr, flush=True)
@@ -179,6 +206,11 @@ def _vad_prob(vad_model, audio_float: np.ndarray, sample_rate: int) -> float:
     if vad_model is None:
         return 0.0
     try:
+        import torch
+        if isinstance(vad_model, torch.nn.Module):
+            tensor = torch.from_numpy(audio_float).unsqueeze(0)
+            return float(vad_model(tensor, sample_rate).item())
+        # ONNX fallback
         prob = vad_model(audio_float, sample_rate)
         return float(prob.item() if hasattr(prob, "item") else prob)
     except Exception as e:
@@ -295,9 +327,13 @@ def main():
         sys.exit(3)
 
     chunk_ms = (TARGET_CHUNK / float(TARGET_RATE)) * 1000.0
-    min_silence_frames = max(1, int(VAD_MIN_SILENCE_MS / chunk_ms)) if chunk_ms > 0 else 1
-    min_speech_frames = max(1, int(VAD_MIN_SPEECH_MS / chunk_ms)) if chunk_ms > 0 else 1
-    min_utterance_samples = int((VAD_MIN_SPEECH_MS / 1000.0) * TARGET_RATE)
+    min_silence_frames = frames_for_ms(VAD_MIN_SILENCE_MS, chunk_ms)
+    min_speech_frames = frames_for_ms(VAD_MIN_SPEECH_MS, chunk_ms)
+    pre_pad_frames = frames_for_ms(VAD_PRE_PAD_MS, chunk_ms)
+    post_pad_frames = frames_for_ms(VAD_POST_PAD_MS, chunk_ms)
+    min_utterance_samples = samples_for_ms(VAD_MIN_SPEECH_MS, TARGET_RATE)
+    max_utterance_ms = positive_int_from_env(os.environ.get("VAD_MAX_UTTERANCE_MS"), VAD_MAX_UTTERANCE_MS)
+    max_utterance_samples = samples_for_ms(max_utterance_ms, TARGET_RATE)
 
     session_lock = threading.Lock()
     current_session = {"state": None}
@@ -409,7 +445,7 @@ def main():
             state.loopback_rate = loopback_rate
             state.mic_chunk = input_chunk
             state.loopback_chunk = loopback_chunk
-            state.pre_buffer = collections.deque()
+            state.pre_buffer = collections.deque(maxlen=pre_pad_frames or None)
             if hasattr(vad_model, "reset_states"):
                 vad_model.reset_states()
             current_session["state"] = state
@@ -473,6 +509,16 @@ def main():
         if audio_i16.size >= min_utterance_samples:
             state.utterance_queue.put(audio_i16)
 
+    def finish_active_utterance(state: SessionState):
+        if state.silence_buffer and state.utterance_frames:
+            state.utterance_frames.extend(take_post_pad_frames(state.silence_buffer, post_pad_frames))
+        finalize_utterance(state, state.utterance_frames)
+        state.pre_buffer.clear()
+        state.silence_buffer = []
+        state.utterance_frames = []
+        state.speaking = False
+        state.speech_run = 0
+
     def recording_loop():
         while not shutdown_event.is_set():
             with session_lock:
@@ -516,71 +562,79 @@ def main():
                         except Exception:
                             pass
 
-                mic_data = state.stream.read(state.mic_chunk, exception_on_overflow=False)
-                mic_i16 = np.frombuffer(mic_data, dtype=np.int16)
-                mic_i16 = _downmix_to_mono(mic_i16, state.mic_channels)
-                mic_i16 = _resample_linear(mic_i16, state.mic_rate, TARGET_RATE)
+                try:
+                    mic_data = state.stream.read(state.mic_chunk, exception_on_overflow=False)
+                except Exception as _read_err:
+                    send({"event": "error", "msg": f"recording error: {_read_err}"})
+                    state.stop_event.set()
+                    break
 
-                loop_i16 = np.array([], dtype=np.int16)
-                if state.loopback_stream is not None:
-                    try:
-                        available = state.loopback_stream.get_read_available()
-                    except Exception:
-                        available = state.loopback_chunk
-                    if available > 0:
+                try:
+                    mic_i16 = np.frombuffer(mic_data, dtype=np.int16)
+                    mic_i16 = _downmix_to_mono(mic_i16, state.mic_channels)
+                    mic_i16 = _resample_linear(mic_i16, state.mic_rate, TARGET_RATE)
+
+                    loop_i16 = np.array([], dtype=np.int16)
+                    if state.loopback_stream is not None:
                         try:
-                            frames = min(available, state.loopback_chunk)
-                            loop_data = state.loopback_stream.read(frames, exception_on_overflow=False)
-                            loop_i16 = np.frombuffer(loop_data, dtype=np.int16)
-                            loop_i16 = _downmix_to_mono(loop_i16, state.loopback_channels)
-                            loop_i16 = _resample_linear(loop_i16, state.loopback_rate, TARGET_RATE)
-                            if mic_i16.size > 0 and loop_i16.size > 0 and loop_i16.size != mic_i16.size:
-                                loop_i16 = _resample_to_length(loop_i16, mic_i16.size)
+                            available = state.loopback_stream.get_read_available()
                         except Exception:
-                            loop_i16 = np.array([], dtype=np.int16)
+                            available = state.loopback_chunk
+                        if available > 0:
+                            try:
+                                frames = min(available, state.loopback_chunk)
+                                loop_data = state.loopback_stream.read(frames, exception_on_overflow=False)
+                                loop_i16 = np.frombuffer(loop_data, dtype=np.int16)
+                                loop_i16 = _downmix_to_mono(loop_i16, state.loopback_channels)
+                                loop_i16 = _resample_linear(loop_i16, state.loopback_rate, TARGET_RATE)
+                                if mic_i16.size > 0 and loop_i16.size > 0 and loop_i16.size != mic_i16.size:
+                                    loop_i16 = _resample_to_length(loop_i16, mic_i16.size)
+                            except Exception:
+                                loop_i16 = np.array([], dtype=np.int16)
 
-                audio_i16 = _mix_audio(mic_i16, loop_i16)
-                if audio_i16.size:
-                    state.wf.writeframes(audio_i16.tobytes())
+                    audio_i16 = _mix_audio(mic_i16, loop_i16)
+                    if audio_i16.size:
+                        state.wf.writeframes(audio_i16.tobytes())
 
-                if audio_i16.size == 0:
-                    continue
-                audio_f32 = audio_i16.astype(np.float32) / 32768.0
-                speech_prob = _vad_prob(vad_model, audio_f32, TARGET_RATE)
-                is_speech = speech_prob >= VAD_THRESHOLD
+                    if audio_i16.size == 0:
+                        continue
+                    audio_f32 = audio_i16.astype(np.float32) / 32768.0
+                    speech_prob = _vad_prob(vad_model, audio_f32, TARGET_RATE)
+                    is_speech = speech_prob >= VAD_THRESHOLD
 
-                if not state.speaking:
-                    state.pre_buffer.append(audio_i16)
-                    if is_speech:
-                        state.speech_run += 1
-                    else:
-                        state.speech_run = 0
-                    if state.speech_run >= min_speech_frames:
-                        state.speaking = True
-                        state.utterance_frames = list(state.pre_buffer)
-                        state.pre_buffer.clear()
-                        state.silence_buffer = []
-                else:
-                    if is_speech:
-                        if state.silence_buffer:
-                            state.utterance_frames.extend(state.silence_buffer)
-                            state.silence_buffer = []
-                        state.utterance_frames.append(audio_i16)
-                    else:
-                        state.silence_buffer.append(audio_i16)
-                        if len(state.silence_buffer) >= min_silence_frames:
-                            state.utterance_frames.extend(state.silence_buffer)
-                            finalize_utterance(state, state.utterance_frames)
-                            state.pre_buffer = collections.deque()
-                            state.silence_buffer = []
-                            state.utterance_frames = []
-                            state.speaking = False
+                    if not state.speaking:
+                        state.pre_buffer.append(audio_i16)
+                        if is_speech:
+                            state.speech_run += 1
+                        else:
                             state.speech_run = 0
+                        if state.speech_run >= min_speech_frames:
+                            state.speaking = True
+                            state.utterance_frames = list(state.pre_buffer)
+                            state.pre_buffer.clear()
+                            state.silence_buffer = []
+                    else:
+                        if is_speech:
+                            if state.silence_buffer:
+                                state.utterance_frames.extend(state.silence_buffer)
+                                state.silence_buffer = []
+                            state.utterance_frames.append(audio_i16)
+                        else:
+                            state.silence_buffer.append(audio_i16)
+                            if len(state.silence_buffer) >= min_silence_frames:
+                                finish_active_utterance(state)
 
-                elapsed = time.time() - state.start_t
-                if elapsed - state.last_print >= 1.0:
-                    state.last_print = elapsed
-                    print(f"[record] seconds={int(elapsed)}", flush=True)
+                        if state.speaking and should_force_flush_utterance(state.utterance_frames, max_utterance_samples):
+                            finish_active_utterance(state)
+
+                    elapsed = time.time() - state.start_t
+                    if elapsed - state.last_print >= 1.0:
+                        state.last_print = elapsed
+                        print(f"[record] seconds={int(elapsed)}", flush=True)
+                except Exception as _proc_err:
+                    send({"event": "error", "msg": f"audio processing error: {_proc_err}"})
+                    state.stop_event.set()
+                    break
 
             try:
                 state.stream.stop_stream()
@@ -598,10 +652,8 @@ def main():
             except Exception:
                 pass
 
-            if state.silence_buffer and state.utterance_frames:
-                state.utterance_frames.extend(state.silence_buffer)
             if state.utterance_frames:
-                finalize_utterance(state, state.utterance_frames)
+                finish_active_utterance(state)
 
             state.utterance_queue.put(None)
             state.utterance_queue.join()
