@@ -22,6 +22,7 @@ import {
 import { registerIpcHandlers } from './registerIpcHandlers'
 import { createRuntimeSupport } from './runtimeSupport'
 import { createSummarizerService } from './summarizerService'
+import { createSetupWindow, isQwenModelPresent } from './setupWindow'
 import { runSmokeHarness } from './smokeHarness'
 import { createTranscriptionService } from './transcriptionService'
 
@@ -527,7 +528,19 @@ app.whenReady().then(() => {
       event.preventDefault()
     })
   })
-  createWindow()
+
+  if (!isQwenModelPresent()) {
+    createSetupWindow({
+      mainDist: MAIN_DIST,
+      rendererDist: RENDERER_DIST,
+      viteDevServerUrl: VITE_DEV_SERVER_URL,
+      onComplete: () => {
+        createWindow()
+      },
+    })
+  } else {
+    createWindow()
+  }
 })
 
 app.on('window-all-closed', () => {
@@ -537,8 +550,10 @@ app.on('window-all-closed', () => {
 
 app.on('activate', () => {
   if (BrowserWindow.getAllWindows().length === 0) {
-    createWindow()
-    void startBackend()
+    if (isQwenModelPresent()) {
+      createWindow()
+      void startBackend()
+    }
   }
 })
 

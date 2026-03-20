@@ -22,4 +22,12 @@ export default defineConfig({
       },
     }),
   ],
+  build: {
+    rollupOptions: {
+      input: {
+        main: path.resolve(__dirname, 'index.html'),
+        setup: path.resolve(__dirname, 'setup.html'),
+      },
+    },
+  },
 })

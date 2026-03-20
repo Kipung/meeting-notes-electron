@@ -36,3 +36,34 @@ const backendApi: BackendApi = {
 }
 
 contextBridge.exposeInMainWorld('backend', backendApi)
+
+type SetupProgressData = {
+  percent: number
+  message: string
+  downloaded?: number
+  total?: number
+}
+
+const setupApi = {
+  startDownload: (): Promise<void> => ipcRenderer.invoke('setup:start-download'),
+
+  onProgress: (cb: (data: SetupProgressData) => void): (() => void) => {
+    const listener = (_event: electron.IpcRendererEvent, data: SetupProgressData) => cb(data)
+    ipcRenderer.on('setup:progress', listener)
+    return () => ipcRenderer.removeListener('setup:progress', listener)
+  },
+
+  onComplete: (cb: () => void): (() => void) => {
+    const listener = () => cb()
+    ipcRenderer.on('setup:complete', listener)
+    return () => ipcRenderer.removeListener('setup:complete', listener)
+  },
+
+  onError: (cb: (data: { message: string }) => void): (() => void) => {
+    const listener = (_event: electron.IpcRendererEvent, data: { message: string }) => cb(data)
+    ipcRenderer.on('setup:error', listener)
+    return () => ipcRenderer.removeListener('setup:error', listener)
+  },
+}
+
+contextBridge.exposeInMainWorld('setupApi', setupApi)
