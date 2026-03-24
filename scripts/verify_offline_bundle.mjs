@@ -66,14 +66,6 @@ const modelsDir = path.join(root, 'models')
 if (!fs.existsSync(modelsDir)) {
   errors.push(`missing models directory: ${modelsDir}`)
 } else {
-  const summaryModelPath = path.join(modelsDir, summaryModelName)
-  if (!fs.existsSync(summaryModelPath)) {
-    const ggufs = fs.readdirSync(modelsDir).filter((f) => f.toLowerCase().endsWith('.gguf'))
-    if (ggufs.length === 0) {
-      errors.push(`missing summary model: ${summaryModelPath} (and no .gguf fallback found)`)
-    }
-  }
-
   const vadModelPath = path.join(modelsDir, 'silero_vad.onnx')
   if (!fs.existsSync(vadModelPath)) {
     errors.push(`missing silero VAD model: ${vadModelPath}`)

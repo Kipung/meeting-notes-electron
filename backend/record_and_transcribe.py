@@ -181,16 +181,6 @@ def _default_whisper_root() -> str:
 
 
 def _vad_load():
-    # Prefer the silero-vad Python package (bundled torch model, reliable across runtimes).
-    try:
-        from silero_vad import load_silero_vad
-        model = load_silero_vad()
-        print("[vad] loaded silero-vad package model", file=sys.stderr, flush=True)
-        return model
-    except Exception as e:
-        print(f"[vad] silero-vad package unavailable, falling back to onnx: {e}", file=sys.stderr, flush=True)
-
-    # Fall back to ONNX file.
     model_path = os.environ.get("SILERO_VAD_MODEL") or _default_vad_model_path()
     if not os.path.exists(model_path):
         print(f"[vad] silero onnx model not found: {model_path}", file=sys.stderr, flush=True)
@@ -206,11 +196,6 @@ def _vad_prob(vad_model, audio_float: np.ndarray, sample_rate: int) -> float:
     if vad_model is None:
         return 0.0
     try:
-        import torch
-        if isinstance(vad_model, torch.nn.Module):
-            tensor = torch.from_numpy(audio_float).unsqueeze(0)
-            return float(vad_model(tensor, sample_rate).item())
-        # ONNX fallback
         prob = vad_model(audio_float, sample_rate)
         return float(prob.item() if hasattr(prob, "item") else prob)
     except Exception as e:
