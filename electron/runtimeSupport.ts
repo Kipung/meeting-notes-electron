@@ -1,17 +1,13 @@
 import { spawn } from 'node:child_process'
 import fs from 'node:fs'
-import http from 'node:http'
-import https from 'node:https'
 import path from 'node:path'
 
 import type { App } from 'electron'
 
+import { downloadFile, verifyFileSha256 } from './utils/fileDownloader'
+import { makeJsonLineParser } from './utils/lineParser'
+
 type BootstrapStatusState = 'running' | 'done' | 'error'
-type DownloadProgress = {
-  downloaded: number
-  total?: number
-  percent?: number
-}
 
 type RuntimeSupportOptions = {
   app: App
@@ -31,6 +27,9 @@ export function createRuntimeSupport(options: RuntimeSupportOptions) {
     defaultSummaryModelName,
     defaultSileroVadUrl,
   } = options
+
+  // SHA256 for the pinned silero_vad.onnx v6.2.1
+  const SILERO_VAD_SHA256 = '1a153a22f4509e292a94e67d6f9b85e8deb25b4988682b7e174c65279d8788e3'
 
   let setupState: 'idle' | 'running' | 'done' | 'error' = 'idle'
   let setupPromise: Promise<boolean> | null = null
@@ -323,80 +322,11 @@ export function createRuntimeSupport(options: RuntimeSupportOptions) {
     }
     env.GGML_LOG_LEVEL = env.GGML_LOG_LEVEL || '0'
     env.LLAMA_CPP_LOG_LEVEL = env.LLAMA_CPP_LOG_LEVEL || '0'
+    // Prevent HuggingFace/transformers from making unexpected network calls at runtime.
+    // These are deleted in runSetupScript so the initial download can still happen.
+    env.HF_HUB_OFFLINE = '1'
+    env.TRANSFORMERS_OFFLINE = '1'
     return env
-  }
-
-  function getHttpClient(url: string) {
-    return url.startsWith('https:') ? https : http
-  }
-
-  function downloadFile(
-    url: string,
-    destPath: string,
-    onProgress?: (progress: DownloadProgress) => void,
-    redirects = 0,
-  ): Promise<void> {
-    if (redirects > 5) {
-      return Promise.reject(new Error('too many redirects'))
-    }
-    return new Promise((resolve, reject) => {
-      const client = getHttpClient(url)
-      const request = client.get(url, (res) => {
-        if (res.statusCode && res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
-          res.resume()
-          resolve(downloadFile(res.headers.location, destPath, onProgress, redirects + 1))
-          return
-        }
-        if (res.statusCode !== 200) {
-          res.resume()
-          reject(new Error(`download failed with status ${res.statusCode}`))
-          return
-        }
-        fs.mkdirSync(path.dirname(destPath), { recursive: true })
-        const tmpPath = `${destPath}.partial`
-        const file = fs.createWriteStream(tmpPath)
-        let downloaded = 0
-        const total = Number(res.headers['content-length'] || 0)
-        res.on('data', (chunk) => {
-          downloaded += chunk.length
-          if (!onProgress) return
-          if (total > 0) {
-            const percent = Math.min(100, Math.round((downloaded / total) * 100))
-            onProgress({ downloaded, total, percent })
-            return
-          }
-          onProgress({ downloaded })
-        })
-        res.on('error', (error) => {
-          file.close(() => undefined)
-          try {
-            fs.unlinkSync(tmpPath)
-          } catch {
-            // ignore cleanup errors
-          }
-          reject(error)
-        })
-        file.on('error', (error) => {
-          res.destroy()
-          try {
-            fs.unlinkSync(tmpPath)
-          } catch {
-            // ignore cleanup errors
-          }
-          reject(error)
-        })
-        file.on('finish', () => {
-          file.close(() => {
-            fs.rename(tmpPath, destPath, (error) => {
-              if (error) reject(error)
-              else resolve()
-            })
-          })
-        })
-        res.pipe(file)
-      })
-      request.on('error', reject)
-    })
   }
 
   async function verifyPythonCommand(command: string): Promise<void> {
@@ -456,33 +386,23 @@ export function createRuntimeSupport(options: RuntimeSupportOptions) {
         WHISPER_MODEL: whisperModel,
         WHISPER_DIR: whisperDir,
       }
+      // Allow network access during setup so HuggingFace downloads can proceed
+      delete env.HF_HUB_OFFLINE
+      delete env.TRANSFORMERS_OFFLINE
       if (resolvedVadModelPath) env.SILERO_VAD_MODEL = resolvedVadModelPath
       const proc = spawn(getPythonCommand(), [script], {
         stdio: ['ignore', 'pipe', 'pipe'],
         env,
       })
-      let buf = ''
-      proc.stdout?.on('data', (data) => {
-        buf += data.toString()
-        const parts = buf.split('\n')
-        buf = parts.pop() || ''
-        for (const raw of parts) {
-          const line = raw.trim()
-          if (!line) continue
-          try {
-            const obj = JSON.parse(line) as { event?: string; message?: string }
-            if (obj.event === 'status') {
-              sendBootstrapStatus('running', obj.message || 'running setup')
-            } else if (obj.event === 'done') {
-              sendBootstrapStatus('running', obj.message || 'setup complete')
-            } else if (obj.event === 'error') {
-              sendBootstrapStatus('error', obj.message || 'setup failed')
-            }
-          } catch {
-            // Ignore non-JSON setup output lines.
-          }
+      proc.stdout?.on('data', makeJsonLineParser<{ event?: string; message?: string }>((obj) => {
+        if (obj.event === 'status') {
+          sendBootstrapStatus('running', obj.message || 'running setup')
+        } else if (obj.event === 'done') {
+          sendBootstrapStatus('running', obj.message || 'setup complete')
+        } else if (obj.event === 'error') {
+          sendBootstrapStatus('error', obj.message || 'setup failed')
         }
-      })
+      }))
       proc.stderr?.on('data', (data) => console.error('[setup err]', data.toString().trim()))
       proc.on('error', reject)
       proc.on('exit', (code) => {
@@ -493,7 +413,7 @@ export function createRuntimeSupport(options: RuntimeSupportOptions) {
   }
 
   async function ensureWhisperModel(): Promise<void> {
-    const model = process.env['WHISPER_MODEL'] || 'small.en'
+    const model = process.env['WHISPER_MODEL'] || 'medium.en'
     const whisperDir = getWhisperRoot()
     const repoIdDir = `models--Systran--faster-whisper-${model}`
     const localCacheDir = path.join(whisperDir, repoIdDir)
@@ -533,6 +453,10 @@ export function createRuntimeSupport(options: RuntimeSupportOptions) {
         sendBootstrapStatus('running', 'downloading VAD model', progress.percent)
       }
     })
+    // Only verify if using the default pinned URL (custom overrides may have different hashes)
+    if (!process.env['SILERO_VAD_URL']?.trim()) {
+      await verifyFileSha256(targetPath, SILERO_VAD_SHA256)
+    }
     return targetPath
   }
 

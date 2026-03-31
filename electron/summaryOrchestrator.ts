@@ -2,8 +2,13 @@ import path from 'node:path'
 
 import type { SummarizerContextMetadata } from './sessionMetadata'
 
-const CHUNK_WORD_THRESHOLD = 900
-const FINAL_SUMMARY_DIRECT_TRANSCRIPT_WORD_THRESHOLD = 1400
+const DEFAULT_CHUNK_WORD_THRESHOLD = 900
+const DEFAULT_FINAL_SUMMARY_DIRECT_THRESHOLD = 1400
+
+export type OrchestratorOptions = {
+  chunkWordThreshold?: number
+  finalSummaryDirectThreshold?: number
+}
 
 export type SummarizerContext = {
   type?: 'chunk' | 'final'
@@ -50,6 +55,8 @@ function countWords(text: string): number {
 }
 
 export class SummaryOrchestrator {
+  private readonly chunkWordThreshold: number
+  private readonly finalSummaryDirectThreshold: number
   private chunkQueue: ChunkTask[] = []
   private chunkProcessing = false
   private nextChunkId = 0
@@ -61,6 +68,11 @@ export class SummaryOrchestrator {
   private finalSummaryRunning = false
   private chunkSummariesSession: string | null = null
   private pendingFinalSummarySession: string | null = null
+
+  constructor(options: OrchestratorOptions = {}) {
+    this.chunkWordThreshold = options.chunkWordThreshold ?? DEFAULT_CHUNK_WORD_THRESHOLD
+    this.finalSummaryDirectThreshold = options.finalSummaryDirectThreshold ?? DEFAULT_FINAL_SUMMARY_DIRECT_THRESHOLD
+  }
 
   reset(): void {
     this.chunkQueue = []
@@ -91,7 +103,7 @@ export class SummaryOrchestrator {
     this.transcriptBuffer = text
     const unprocessed = this.transcriptBuffer.slice(this.lastTranscriptOffset)
     if (!unprocessed.trim()) return
-    if (countWords(unprocessed) < CHUNK_WORD_THRESHOLD) return
+    if (countWords(unprocessed) < this.chunkWordThreshold) return
     this.queueChunkSummarization(unprocessed, args)
     this.lastTranscriptOffset = this.transcriptBuffer.length
   }
@@ -189,7 +201,7 @@ export class SummaryOrchestrator {
       cmd: 'summarize',
       text: task.text,
       out: null,
-      chunk_words: CHUNK_WORD_THRESHOLD,
+      chunk_words: this.chunkWordThreshold,
       context: { type: 'chunk', id: task.id, sessionDir: task.sessionDir },
     }
     const ok = args.sendCommand(payload)
@@ -221,7 +233,7 @@ export class SummaryOrchestrator {
     const leftover = fullText.slice(leftoverStart).trim()
     const transcriptWordCount = countWords(fullText)
     let inputText = fullText
-    let finalChunkWords = CHUNK_WORD_THRESHOLD
+    let finalChunkWords = this.chunkWordThreshold
     const summarySessionDir = this.pendingFinalSummarySession || args.currentSessionDir
 
     if (!summarySessionDir) {
@@ -236,15 +248,15 @@ export class SummaryOrchestrator {
       ...args.buildSummaryContext(summarySessionDir),
     }
 
-    if (transcriptWordCount <= FINAL_SUMMARY_DIRECT_TRANSCRIPT_WORD_THRESHOLD) {
-      finalChunkWords = Math.max(transcriptWordCount + 1, FINAL_SUMMARY_DIRECT_TRANSCRIPT_WORD_THRESHOLD)
+    if (transcriptWordCount <= this.finalSummaryDirectThreshold) {
+      finalChunkWords = Math.max(transcriptWordCount + 1, this.finalSummaryDirectThreshold)
     } else if (orderedSummaries.length > 0) {
       const segments: string[] = [`Previous chunk summaries:\n${orderedSummaries.join('\n\n')}`]
       if (leftover) {
         segments.push(`Remaining transcript:\n${leftover}`)
       }
       inputText = segments.join('\n\n')
-      finalChunkWords = Math.max(countWords(inputText) + 1, FINAL_SUMMARY_DIRECT_TRANSCRIPT_WORD_THRESHOLD)
+      finalChunkWords = Math.max(countWords(inputText) + 1, this.finalSummaryDirectThreshold)
       context.sourceTranscript = fullText
     }
 

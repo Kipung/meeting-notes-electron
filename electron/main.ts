@@ -1,5 +1,4 @@
 import * as electron from 'electron'
-import { spawn } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import fs from 'node:fs'
 import path from 'node:path'
@@ -48,16 +47,16 @@ process.env.VITE_PUBLIC = VITE_DEV_SERVER_URL ? path.join(process.env.APP_ROOT, 
 
 const PREFERRED_SUMMARY_MODEL_NAMES = [
   'qwen2.5-3b-instruct-q4_k_m.gguf',
-  'Llama-3.2-1B-Instruct-Q6_K.gguf',
 ]
 const DEFAULT_SUMMARY_MODEL_NAME = PREFERRED_SUMMARY_MODEL_NAMES[0]
-const DEFAULT_SILERO_VAD_URL = 'https://github.com/snakers4/silero-vad/raw/master/files/silero_vad.onnx'
+// Pinned to v6.2.1 tag — SHA256: 1a153a22f4509e292a94e67d6f9b85e8deb25b4988682b7e174c65279d8788e3
+const DEFAULT_SILERO_VAD_URL = 'https://raw.githubusercontent.com/snakers4/silero-vad/v6.2.1/src/silero_vad/data/silero_vad.onnx'
 
 
 
 let win: electron.BrowserWindow | null
 let currentSessionDir: string | null = null
-let currentModelName: string = 'small.en'
+let currentModelName: string = 'medium.en'
 type BackendStartOptions = {
   deviceIndex?: number
   loopbackDeviceIndex?: number
@@ -130,20 +129,6 @@ function sendBootstrapStatus(state: 'running' | 'done' | 'error', message: strin
   }
 }
 
-function sendProcessCommand(proc: ReturnType<typeof spawn> | null, label: string, payload: string) {
-  if (!proc?.stdin) {
-    console.error(`[${label}] stdin not available`)
-    return false
-  }
-  try {
-    proc.stdin.write(payload)
-    return true
-  } catch (e) {
-    console.error(`[${label}] failed to write`, e)
-    return false
-  }
-}
-
 const runtimeSupport = createRuntimeSupport({
   app,
   getUserDataRoot,
@@ -175,7 +160,6 @@ const summarizerService = createSummarizerService({
   buildSummaryContextForSession,
   getCurrentSessionDir: () => currentSessionDir,
   sendToRenderer,
-  sendProcessCommand,
   log: console,
 })
 
@@ -200,25 +184,13 @@ const transcriptionService = createTranscriptionService({
 })
 
 function handleTranscriptReady(outPath: string, text: string) {
-  try {
-    win?.webContents.send('transcript-ready', { sessionDir: currentSessionDir, transcriptPath: outPath, text })
-  } catch (e) {
-    console.error('failed to send transcript-ready', e)
-  }
-  try {
-    win?.webContents.send('transcription-status', { state: 'done', sessionDir: currentSessionDir, message: 'transcription complete' })
-  } catch (e) {
-    console.error('failed to send transcription-status done', e)
-  }
+  sendToRenderer('transcript-ready', { sessionDir: currentSessionDir, transcriptPath: outPath, text }, 'failed to send transcript-ready')
+  sendToRenderer('transcription-status', { state: 'done', sessionDir: currentSessionDir, message: 'transcription complete' }, 'failed to send transcription-status done')
   try {
     summarizerService.requestTranscriptSummary(text)
   } catch (e) {
     console.error('failed to start summarizer', e)
-    try {
-      win?.webContents.send('summary-status', { state: 'error', sessionDir: currentSessionDir, message: 'failed to start summarizer' })
-    } catch (e2) {
-      console.error('failed to send summary-status error', e2)
-    }
+    sendToRenderer('summary-status', { state: 'error', sessionDir: currentSessionDir, message: 'failed to start summarizer' }, 'failed to send summary-status error')
   }
 }
 
@@ -227,11 +199,7 @@ function startImportedSession(): string {
   currentSessionDir = sessionDir
   summaryOrchestrator.startSession(sessionDir)
   applySessionMetadata(undefined, sessionDir)
-  try {
-    win?.webContents.send('session-started', { sessionDir, sessionsRoot: getSessionsRoot() })
-  } catch (e) {
-    console.error('failed to send session-started for imported input', e)
-  }
+  sendToRenderer('session-started', { sessionDir, sessionsRoot: getSessionsRoot() }, 'failed to send session-started for imported input')
   return sessionDir
 }
 
@@ -284,11 +252,7 @@ async function processTranscriptText(text: string, metadata?: SessionMetadataInp
   } catch (e) {
     return { ok: false, error: `failed to write transcript: ${e instanceof Error ? e.message : String(e)}` }
   }
-  try {
-    win?.webContents.send('transcription-status', { state: 'running', sessionDir, message: 'processing transcript text' })
-  } catch (e) {
-    console.error('failed to send transcription-status running for transcript text', e)
-  }
+  sendToRenderer('transcription-status', { state: 'running', sessionDir, message: 'processing transcript text' }, 'failed to send transcription-status running for transcript text')
   handleTranscriptReady(transcriptPath, trimmed)
   return { ok: true }
 }
@@ -376,11 +340,7 @@ async function handleBackendStart(opts: BackendStartOptions = {}): Promise<void>
   currentSessionDir = sessionDir
   summaryOrchestrator.startSession(sessionDir)
   applySessionMetadata(undefined, sessionDir)
-  try {
-    win?.webContents.send('session-started', { sessionDir, sessionsRoot: getSessionsRoot() })
-  } catch (e) {
-    console.error('failed to send session-started', e)
-  }
+  sendToRenderer('session-started', { sessionDir, sessionsRoot: getSessionsRoot() }, 'failed to send session-started')
   const result = transcriptionService.startRecordingSession({
     sessionDir,
     deviceIndex: opts.deviceIndex,

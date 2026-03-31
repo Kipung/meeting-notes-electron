@@ -1,7 +1,10 @@
-import { useEffect, useMemo, useRef, useState, type DragEvent } from 'react'
+import { useEffect, useMemo, useState, type DragEvent } from 'react'
 import './App.css'
+import { useRecordingTimer } from './hooks/useRecordingTimer'
+import { useSessionMetadata } from './hooks/useSessionMetadata'
+import { useFollowUpEmail } from './hooks/useFollowUpEmail'
 
-const DEFAULT_WHISPER_MODEL = 'small.en'
+const DEFAULT_WHISPER_MODEL = 'medium.en'
 type StepState = 'idle' | 'running' | 'paused' | 'done' | 'error'
 type DroppedFile = File & { path?: string }
 const backend = window.backend
@@ -279,25 +282,34 @@ function App() {
   const [setupMessage, setSetupMessage] = useState('')
   const [setupPercent, setSetupPercent] = useState<number | null>(null)
   const [recorderReady, setRecorderReady] = useState(false)
-  const [elapsedSeconds, setElapsedSeconds] = useState(0)
-  const [blinkOn, setBlinkOn] = useState(false)
-  const recordingStartRef = useRef<number | null>(null)
-  const pauseStartRef = useRef<number | null>(null)
-  const pausedMsRef = useRef(0)
+  const {
+    elapsedSeconds,
+    blinkOn,
+    formatElapsed,
+    startTimer,
+    pauseTimer,
+    resumeTimer,
+    stopTimer,
+    resetTimer,
+  } = useRecordingTimer(recordingState)
   const [transcript, setTranscript] = useState('')
   const [summary, setSummary] = useState('')
   const [sessionDir, setSessionDir] = useState<string | null>(null)
   const [sessionsRoot, setSessionsRoot] = useState<string | null>(null)
-  const [sessionModality, setSessionModality] = useState('')
-  const [sessionSubject, setSessionSubject] = useState('')
-  const [coachInitials, setCoachInitials] = useState('')
-  const [studentId, setStudentId] = useState('')
-  const [studentName, setStudentName] = useState('')
+  const {
+    sessionModality,
+    setSessionModality,
+    sessionSubject,
+    setSessionSubject,
+    coachInitials,
+    setCoachInitials,
+    studentId,
+    setStudentId,
+    studentName,
+    setStudentName,
+    sessionMetadataPayload,
+  } = useSessionMetadata({ sessionDir, running, recordingState, transcriptionState, summarizationState })
   const [audioDeleteMessage, setAudioDeleteMessage] = useState('')
-  const [followUpEmail, setFollowUpEmail] = useState('')
-  const [followUpInstructions, setFollowUpInstructions] = useState('')
-  const [followUpGenerating, setFollowUpGenerating] = useState(false)
-  const [followUpStatus, setFollowUpStatus] = useState('')
   const [processingRecordingFile, setProcessingRecordingFile] = useState(false)
   const [processingTranscriptFile, setProcessingTranscriptFile] = useState(false)
   const [summarizingTranscriptText, setSummarizingTranscriptText] = useState(false)
@@ -306,12 +318,18 @@ function App() {
   const [summaryProgressMessage, setSummaryProgressMessage] = useState('')
   const isWindows = /Windows/.test(navigator.userAgent)
 
-  const getElapsedSeconds = () => {
-    if (!recordingStartRef.current) return 0
-    const now = Date.now()
-    const pausedMs = pausedMsRef.current + (pauseStartRef.current ? now - pauseStartRef.current : 0)
-    return Math.max(0, Math.floor((now - recordingStartRef.current - pausedMs) / 1000))
-  }
+  // Computed from summary — placed here so useFollowUpEmail can depend on them
+  const parsedSummary = useMemo(() => parseSummaryForView(summary), [summary])
+  const effectiveSummaryText = parsedSummary.summaryText || extractSummaryFallbackText(summary)
+  const {
+    followUpEmail,
+    followUpInstructions,
+    setFollowUpInstructions,
+    followUpGenerating,
+    followUpStatus,
+    reset: resetFollowUp,
+    onGenerateFollowUpEmail,
+  } = useFollowUpEmail({ summary, parsedSummary, effectiveSummaryText, studentName })
 
   useEffect(() => {
     void (async () => {
@@ -372,10 +390,7 @@ function App() {
 
     const offRecordingStarted = backend.onRecordingStarted((_ev, data) => {
       const startedAtMs = typeof data?.startedAtMs === 'number' ? data.startedAtMs : Date.now()
-      recordingStartRef.current = startedAtMs
-      pauseStartRef.current = null
-      pausedMsRef.current = 0
-      setElapsedSeconds(0)
+      startTimer(startedAtMs)
     })
 
     const offSummary = backend.onSummary((_ev, data) => {
@@ -386,17 +401,13 @@ function App() {
       setSummary(text)
       setSummaryProgressMessage('')
       setSummaryProgressSteps([])
-      setFollowUpEmail('')
-      setFollowUpStatus('')
-      setFollowUpGenerating(false)
+      resetFollowUp()
     })
 
     const offSummaryStream = backend.onSummaryStream((_ev, data) => {
       if (data.reset) {
         setSummary('')
-        setFollowUpEmail('')
-        setFollowUpStatus('')
-        setFollowUpGenerating(false)
+        resetFollowUp()
       }
       const delta = data.delta || ''
       if (delta) {
@@ -442,51 +453,8 @@ function App() {
       offSummaryStatus()
       offBootstrapStatus()
     }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
-
-  useEffect(() => {
-    if (recordingState !== 'running') {
-      setBlinkOn(false)
-      return
-    }
-    const interval = setInterval(() => {
-      setBlinkOn((prev) => !prev)
-      setElapsedSeconds(getElapsedSeconds())
-    }, 500)
-    return () => clearInterval(interval)
-  }, [recordingState])
-
-  const formatElapsed = (secs: number) => {
-    const hours = Math.floor(secs / 3600)
-    const minutes = Math.floor((secs % 3600) / 60)
-    const seconds = secs % 60
-    if (hours > 0) {
-      return `${hours}:${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`
-    }
-    return `${minutes}:${String(seconds).padStart(2, '0')}`
-  }
-
-  const sessionMetadataPayload = useMemo<BackendSessionMetadataPayload>(
-    () => ({
-      modality: sessionModality.trim(),
-      subject: sessionSubject.trim(),
-      studentId: studentId.trim(),
-      studentName: studentName.trim(),
-      coachInitials: coachInitials.trim(),
-    }),
-    [sessionModality, sessionSubject, studentId, studentName, coachInitials]
-  )
-
-  const syncSessionMetadataActive =
-    Boolean(sessionDir) &&
-    (running || recordingState === 'paused' || transcriptionState === 'running' || summarizationState === 'running')
-
-  useEffect(() => {
-    if (!syncSessionMetadataActive) return
-    void backend.setSessionMetadata(sessionMetadataPayload).catch((e) => {
-      console.error('setSessionMetadata failed', e)
-    })
-  }, [syncSessionMetadataActive, sessionMetadataPayload])
 
   const normalizePath = (value: string) => value.replace(/\\/g, '/')
   const compactPath = (value: string, root?: string | null) => {
@@ -511,19 +479,14 @@ function App() {
     setSummary('')
     setSummaryProgressMessage('')
     setSummaryProgressSteps([])
-    setFollowUpEmail('')
-    setFollowUpStatus('')
-    setFollowUpGenerating(false)
+    resetFollowUp()
     setStatus('recording')
     setStatusDetail('recording audio')
     setRecordingState('running')
     setTranscriptionState('idle')
     setSummarizationState('idle')
     setSessionDir(null)
-    recordingStartRef.current = null
-    pauseStartRef.current = null
-    pausedMsRef.current = 0
-    setElapsedSeconds(0)
+    resetTimer()
     setRunning(true)
     setAudioDeleteMessage('')
     backend.start({
@@ -535,10 +498,7 @@ function App() {
   }
 
   const onStop = () => {
-    if (pauseStartRef.current) {
-      pausedMsRef.current += Date.now() - pauseStartRef.current
-      pauseStartRef.current = null
-    }
+    stopTimer()
     setStatus('stopping')
     setStatusDetail('stopping recording')
     setRecordingState('done')
@@ -549,8 +509,7 @@ function App() {
   const onPauseToggle = () => {
     if (!running) return
     if (recordingState === 'running') {
-      pauseStartRef.current = Date.now()
-      setElapsedSeconds(getElapsedSeconds())
+      pauseTimer()
       setStatus('paused')
       setStatusDetail('recording paused')
       setRecordingState('paused')
@@ -558,11 +517,7 @@ function App() {
       return
     }
     if (recordingState === 'paused') {
-      if (pauseStartRef.current) {
-        pausedMsRef.current += Date.now() - pauseStartRef.current
-        pauseStartRef.current = null
-      }
-      setElapsedSeconds(getElapsedSeconds())
+      resumeTimer()
       setStatus('recording')
       setStatusDetail('recording audio')
       setRecordingState('running')
@@ -718,14 +673,12 @@ function App() {
   const canImportFiles = !running && !importBusy
   const canDeleteAudio = Boolean(sessionDir) && transcriptionState === 'done' && recordingState !== 'running' && recordingState !== 'paused'
   const followUpActionLabel = followUpGenerating ? 'Generating...' : followUpEmail ? 'Regenerate from summary' : 'Generate from summary'
-  const parsedSummary = useMemo(() => parseSummaryForView(summary), [summary])
   const showSummaryProgress = summarizationState === 'running' && !summary
   const showSummaryError = summarizationState === 'error' && !summary
   const summaryProgressHint =
     summaryProgressMessage && !/summary complete/i.test(summaryProgressMessage)
       ? summaryProgressMessage
       : 'Chunking and cleanup run in the background. The final summary appears when it is ready.'
-  const effectiveSummaryText = parsedSummary.summaryText || extractSummaryFallbackText(summary)
   const summaryDateText = useMemo(
     () =>
       new Intl.DateTimeFormat('en-US', {
@@ -807,30 +760,6 @@ function App() {
       if (nextRoot) setSessionsRoot(nextRoot)
     } catch (e) {
       console.error('chooseSessionsRoot failed', e)
-    }
-  }
-
-  const onGenerateFollowUpEmail = async () => {
-    if (!summary || followUpGenerating) return
-    setFollowUpGenerating(true)
-    setFollowUpStatus('Generating follow-up email...')
-    try {
-      const res = await backend.generateFollowUpEmail({
-        summary: normalizedSummaryBody,
-        studentName: studentName.trim() || undefined,
-        instructions: followUpInstructions,
-      })
-      if (res && res.ok) {
-        setFollowUpEmail(res.text || '')
-        setFollowUpStatus('')
-      } else {
-        setFollowUpStatus(res?.error || 'Failed to generate follow-up email.')
-      }
-    } catch (e) {
-      console.error('generateFollowUpEmail failed', e)
-      setFollowUpStatus('Failed to generate follow-up email.')
-    } finally {
-      setFollowUpGenerating(false)
     }
   }
 

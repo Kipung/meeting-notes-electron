@@ -2,6 +2,8 @@ import { spawn } from 'node:child_process'
 import fs from 'node:fs'
 import path from 'node:path'
 
+import { makeJsonLineParser } from './utils/lineParser'
+
 type ProcessResult = { ok: boolean; error?: string }
 
 type RecorderEvent = {
@@ -45,9 +47,7 @@ type CreateTranscriptionServiceOptions = {
 
 export function createTranscriptionService(options: CreateTranscriptionServiceOptions) {
   let backendProcess: ReturnType<typeof spawn> | null = null
-  let recordStdoutBuf = ''
   let fileTranscribeProcess: ReturnType<typeof spawn> | null = null
-  let fileTranscribeStdoutBuf = ''
 
   function sendProcessCommand(proc: ReturnType<typeof spawn> | null, label: string, payload: string): boolean {
     if (!proc?.stdin) {
@@ -63,83 +63,68 @@ export function createTranscriptionService(options: CreateTranscriptionServiceOp
     }
   }
 
-  function handleRecorderOutput(data: Buffer): void {
-    recordStdoutBuf += data.toString()
-    const parts = recordStdoutBuf.split('\n')
-    recordStdoutBuf = parts.pop() || ''
-
-    for (const rawLine of parts) {
-      const line = rawLine.trim()
-      if (!line) continue
-
+  const handleRecorderOutput = makeJsonLineParser<RecorderEvent>((obj) => {
+    if (obj.event === 'partial') {
+      const partialText = obj.full_text || obj.fullText || obj.text || ''
+      options.sendToRenderer(
+        'transcript-partial',
+        {
+          sessionDir: options.getCurrentSessionDir(),
+          text: obj.text || '',
+          fullText: partialText,
+        },
+        'failed to send transcript-partial',
+      )
       try {
-        const obj = JSON.parse(line) as RecorderEvent
-
-        if (obj.event === 'partial') {
-          const partialText = obj.full_text || obj.fullText || obj.text || ''
-          options.sendToRenderer(
-            'transcript-partial',
-            {
-              sessionDir: options.getCurrentSessionDir(),
-              text: obj.text || '',
-              fullText: partialText,
-            },
-            'failed to send transcript-partial',
-          )
-          try {
-            options.onTranscriptPartial(partialText)
-          } catch (error) {
-            options.log.error('failed to process transcript partial text', error)
-          }
-          continue
-        }
-
-        if (obj.event === 'started') {
-          const startedAt =
-            typeof obj.started_at === 'number'
-              ? obj.started_at
-              : typeof obj.startedAt === 'number'
-                ? obj.startedAt
-                : null
-          options.sendToRenderer(
-            'recording-started',
-            {
-              sessionDir: options.getCurrentSessionDir(),
-              startedAtMs: startedAt ? Math.round(startedAt * 1000) : Date.now(),
-            },
-            'failed to send recording-started',
-          )
-          continue
-        }
-
-        if (obj.event === 'ready') {
-          options.sendToRenderer('recording-ready', { ready: true }, 'failed to send recording-ready')
-          continue
-        }
-
-        if (obj.event === 'done' && obj.out) {
-          options.onTranscriptReady(obj.out, obj.text || '')
-          continue
-        }
-
-        if (obj.event === 'error') {
-          const message = obj.msg || 'recording error'
-          options.log.error('[backend recorder error]', message)
-          options.sendToRenderer(
-            'transcription-status',
-            {
-              state: 'error',
-              sessionDir: options.getCurrentSessionDir(),
-              message,
-            },
-            'failed to send transcription-status recorder error',
-          )
-        }
-      } catch {
-        continue
+        options.onTranscriptPartial(partialText)
+      } catch (error) {
+        options.log.error('failed to process transcript partial text', error)
       }
+      return
     }
-  }
+
+    if (obj.event === 'started') {
+      const startedAt =
+        typeof obj.started_at === 'number'
+          ? obj.started_at
+          : typeof obj.startedAt === 'number'
+            ? obj.startedAt
+            : null
+      options.sendToRenderer(
+        'recording-started',
+        {
+          sessionDir: options.getCurrentSessionDir(),
+          startedAtMs: startedAt ? Math.round(startedAt * 1000) : Date.now(),
+        },
+        'failed to send recording-started',
+      )
+      return
+    }
+
+    if (obj.event === 'ready') {
+      options.sendToRenderer('recording-ready', { ready: true }, 'failed to send recording-ready')
+      return
+    }
+
+    if (obj.event === 'done' && obj.out) {
+      options.onTranscriptReady(obj.out, obj.text || '')
+      return
+    }
+
+    if (obj.event === 'error') {
+      const message = obj.msg || 'recording error'
+      options.log.error('[backend recorder error]', message)
+      options.sendToRenderer(
+        'transcription-status',
+        {
+          state: 'error',
+          sessionDir: options.getCurrentSessionDir(),
+          message,
+        },
+        'failed to send transcription-status recorder error',
+      )
+    }
+  })
 
   function handleFileTranscribeEvent(obj: RecorderEvent): void {
     const sessionDir = options.getCurrentSessionDir()
@@ -182,7 +167,6 @@ export function createTranscriptionService(options: CreateTranscriptionServiceOp
       return { ok: true }
     }
 
-    recordStdoutBuf = ''
     options.sendToRenderer('recording-ready', { ready: false }, 'failed to send recording-ready false')
 
     const scriptPath = path.join(options.getBackendRoot(), 'record_and_transcribe.py')
@@ -295,7 +279,6 @@ export function createTranscriptionService(options: CreateTranscriptionServiceOp
       TRANSCRIPT_OUT: transcriptPath,
     }
 
-    fileTranscribeStdoutBuf = ''
     fileTranscribeProcess = spawn(options.getPythonCommand(), [script], {
       stdio: ['ignore', 'pipe', 'pipe'],
       env,
@@ -316,20 +299,7 @@ export function createTranscriptionService(options: CreateTranscriptionServiceOp
     })
 
     if (fileTranscribeProcess.stdout) {
-      fileTranscribeProcess.stdout.on('data', (data) => {
-        fileTranscribeStdoutBuf += data.toString()
-        const parts = fileTranscribeStdoutBuf.split('\n')
-        fileTranscribeStdoutBuf = parts.pop() || ''
-        for (const rawLine of parts) {
-          const line = rawLine.trim()
-          if (!line) continue
-          try {
-            handleFileTranscribeEvent(JSON.parse(line) as RecorderEvent)
-          } catch {
-            continue
-          }
-        }
-      })
+      fileTranscribeProcess.stdout.on('data', makeJsonLineParser<RecorderEvent>(handleFileTranscribeEvent))
     } else {
       options.log.error('[file-transcribe] stdout not available')
     }

@@ -3,6 +3,8 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { randomUUID } from 'node:crypto'
 
+import { makeJsonLineParser } from './utils/lineParser'
+
 import type { SummarizerContextMetadata } from './sessionMetadata'
 import type { SummaryCommandPayload, SummarizerContext } from './summaryOrchestrator'
 import { SummaryOrchestrator } from './summaryOrchestrator'
@@ -45,7 +47,6 @@ type CreateSummarizerServiceOptions = {
   buildSummaryContextForSession: (sessionDir: string) => SummarizerContextMetadata
   getCurrentSessionDir: () => string | null
   sendToRenderer: RendererEventSender
-  sendProcessCommand: (proc: ReturnType<typeof spawn> | null, label: string, payload: string) => boolean
   log?: Pick<Console, 'log' | 'warn' | 'error'>
 }
 
@@ -53,9 +54,22 @@ export function createSummarizerService(options: CreateSummarizerServiceOptions)
   const log = options.log || console
 
   let summarizerProcess: ReturnType<typeof spawn> | null = null
-  let summarizerStdoutBuf = ''
   let currentSummaryModelPath: string | null = null
   const followUpRequests = new Map<string, FollowUpRequest>()
+
+  function writeToProcess(payload: string): boolean {
+    if (!summarizerProcess?.stdin) {
+      log.error('[summarizer] stdin not available')
+      return false
+    }
+    try {
+      summarizerProcess.stdin.write(payload)
+      return true
+    } catch (error) {
+      log.error('[summarizer] failed to write to stdin', error)
+      return false
+    }
+  }
 
   function buildSummaryArgs() {
     return {
@@ -67,11 +81,7 @@ export function createSummarizerService(options: CreateSummarizerServiceOptions)
   }
 
   function sendCommand(payload: SummaryCommandPayload): boolean {
-    return options.sendProcessCommand(
-      summarizerProcess,
-      'summarizer',
-      JSON.stringify(payload) + '\n',
-    )
+    return writeToProcess(JSON.stringify(payload) + '\n')
   }
 
   function failPendingFollowUps(error: string): void {
@@ -206,11 +216,7 @@ export function createSummarizerService(options: CreateSummarizerServiceOptions)
 
     if (summarizerProcess) {
       if (currentSummaryModelPath !== modelPath) {
-        const ok = options.sendProcessCommand(
-          summarizerProcess,
-          'summarizer',
-          JSON.stringify({ cmd: 'load_model', model_path: modelPath }) + '\n',
-        )
+        const ok = writeToProcess(JSON.stringify({ cmd: 'load_model', model_path: modelPath }) + '\n')
         if (ok) currentSummaryModelPath = modelPath
       }
       return
@@ -225,25 +231,15 @@ export function createSummarizerService(options: CreateSummarizerServiceOptions)
     currentSummaryModelPath = modelPath
 
     if (summarizerProcess.stdout) {
-      summarizerProcess.stdout.on('data', (data) => {
-        summarizerStdoutBuf += data.toString()
-        const parts = summarizerStdoutBuf.split('\n')
-        summarizerStdoutBuf = parts.pop() || ''
-        for (const line of parts) {
-          if (!line) continue
-          try {
-            handleParsedEvent(JSON.parse(line) as SummarizerEvent)
-          } catch {
-            // ignore non-JSON metadata
-          }
-        }
-      })
+      summarizerProcess.stdout.on('data', makeJsonLineParser<SummarizerEvent>(handleParsedEvent))
     } else {
       log.error('[summarizer] stdout not available')
     }
 
     if (summarizerProcess.stderr) {
-      summarizerProcess.stderr.on('data', () => {})
+      summarizerProcess.stderr.on('data', (data) => {
+        log.error('[summarizer stderr]', (data as Buffer).toString().trim())
+      })
     } else {
       log.error('[summarizer] stderr not available')
     }
@@ -264,7 +260,6 @@ export function createSummarizerService(options: CreateSummarizerServiceOptions)
     summarizerProcess.on('exit', (code) => {
       log.log('[summarizer] exited', code)
       summarizerProcess = null
-      summarizerStdoutBuf = ''
       currentSummaryModelPath = null
       options.summaryOrchestrator.handleSummarizerExit()
       failPendingFollowUps('summarizer exited before follow-up finished')
@@ -358,11 +353,7 @@ export function createSummarizerService(options: CreateSummarizerServiceOptions)
       if (typeof temperature === 'number') cmd.temperature = temperature
       if (typeof maxTokens === 'number') cmd.max_tokens = maxTokens
 
-      const ok = options.sendProcessCommand(
-        summarizerProcess,
-        'summarizer',
-        JSON.stringify(cmd) + '\n',
-      )
+      const ok = writeToProcess(JSON.stringify(cmd) + '\n')
       if (!ok) {
         clearTimeout(timeout)
         followUpRequests.delete(requestId)
@@ -374,7 +365,6 @@ export function createSummarizerService(options: CreateSummarizerServiceOptions)
   function shutdown(): void {
     const proc = summarizerProcess
     summarizerProcess = null
-    summarizerStdoutBuf = ''
     currentSummaryModelPath = null
     options.summaryOrchestrator.handleSummarizerExit()
     failPendingFollowUps('summarizer shut down')
