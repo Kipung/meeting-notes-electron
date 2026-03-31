@@ -1,5 +1,4 @@
 
-import collections
 import json
 import os
 import queue
@@ -19,18 +18,12 @@ from faster_whisper import WhisperModel
 try:
     from backend.recording_vad_utils import (
         frames_for_ms,
-        positive_int_from_env,
         samples_for_ms,
-        should_force_flush_utterance,
-        take_post_pad_frames,
     )
 except ImportError:
     from recording_vad_utils import (  # type: ignore[no-redef]
         frames_for_ms,
-        positive_int_from_env,
         samples_for_ms,
-        should_force_flush_utterance,
-        take_post_pad_frames,
     )
 
 
@@ -40,9 +33,6 @@ TARGET_CHUNK = 512
 VAD_THRESHOLD = 0.5
 VAD_MIN_SILENCE_MS = 600
 VAD_MIN_SPEECH_MS = 200
-VAD_PRE_PAD_MS = 200
-VAD_POST_PAD_MS = 200
-VAD_MAX_UTTERANCE_MS = 8000
 
 
 class SessionState:
@@ -58,11 +48,11 @@ class SessionState:
         self.mic_chunk = TARGET_CHUNK
         self.loopback_chunk = TARGET_CHUNK
         self.wf = wf
-        self.pre_buffer = collections.deque()
-        self.silence_buffer = []
         self.utterance_frames = []
-        self.speech_run = 0
-        self.speaking = False
+        self.silence_run = 0
+        self.saw_speech = False
+        self.chunks_dir: str | None = None
+        self.utterance_count = 0
         self.start_t = time.time()
         self.last_print = 0.0
         self.paused = False
@@ -313,12 +303,7 @@ def main():
 
     chunk_ms = (TARGET_CHUNK / float(TARGET_RATE)) * 1000.0
     min_silence_frames = frames_for_ms(VAD_MIN_SILENCE_MS, chunk_ms)
-    min_speech_frames = frames_for_ms(VAD_MIN_SPEECH_MS, chunk_ms)
-    pre_pad_frames = frames_for_ms(VAD_PRE_PAD_MS, chunk_ms)
-    post_pad_frames = frames_for_ms(VAD_POST_PAD_MS, chunk_ms)
     min_utterance_samples = samples_for_ms(VAD_MIN_SPEECH_MS, TARGET_RATE)
-    max_utterance_ms = positive_int_from_env(os.environ.get("VAD_MAX_UTTERANCE_MS"), VAD_MAX_UTTERANCE_MS)
-    max_utterance_samples = samples_for_ms(max_utterance_ms, TARGET_RATE)
 
     session_lock = threading.Lock()
     current_session = {"state": None}
@@ -430,7 +415,9 @@ def main():
             state.loopback_rate = loopback_rate
             state.mic_chunk = input_chunk
             state.loopback_chunk = loopback_chunk
-            state.pre_buffer = collections.deque(maxlen=pre_pad_frames or None)
+            chunks_dir = os.path.join(os.path.dirname(out_path), "chunks")
+            os.makedirs(chunks_dir, exist_ok=True)
+            state.chunks_dir = chunks_dir
             if hasattr(vad_model, "reset_states"):
                 vad_model.reset_states()
             current_session["state"] = state
@@ -442,6 +429,14 @@ def main():
                         if item is None:
                             return
                         audio_i16 = item
+                        if state.chunks_dir is not None:
+                            state.utterance_count += 1
+                            chunk_path = os.path.join(state.chunks_dir, f"chunk_{state.utterance_count:04d}.wav")
+                            with wave.open(chunk_path, "wb") as cw:
+                                cw.setnchannels(TARGET_CHANNELS)
+                                cw.setsampwidth(sample_width)
+                                cw.setframerate(TARGET_RATE)
+                                cw.writeframes(audio_i16.tobytes())
                         audio_f32 = audio_i16.astype(np.float32) / 32768.0
                         segments, _info = whisper_model.transcribe(
                             audio_f32,
@@ -495,14 +490,10 @@ def main():
             state.utterance_queue.put(audio_i16)
 
     def finish_active_utterance(state: SessionState):
-        if state.silence_buffer and state.utterance_frames:
-            state.utterance_frames.extend(take_post_pad_frames(state.silence_buffer, post_pad_frames))
         finalize_utterance(state, state.utterance_frames)
-        state.pre_buffer.clear()
-        state.silence_buffer = []
         state.utterance_frames = []
-        state.speaking = False
-        state.speech_run = 0
+        state.silence_run = 0
+        state.saw_speech = False
 
     def recording_loop():
         while not shutdown_event.is_set():
@@ -527,11 +518,9 @@ def main():
                             pass
                     if hasattr(vad_model, "reset_states"):
                         vad_model.reset_states()
-                    state.pre_buffer.clear()
-                    state.silence_buffer.clear()
                     state.utterance_frames.clear()
-                    state.speaking = False
-                    state.speech_run = 0
+                    state.silence_run = 0
+                    state.saw_speech = False
                     time.sleep(0.05)
                     continue
                 else:
@@ -587,30 +576,15 @@ def main():
                     speech_prob = _vad_prob(vad_model, audio_f32, TARGET_RATE)
                     is_speech = speech_prob >= VAD_THRESHOLD
 
-                    if not state.speaking:
-                        state.pre_buffer.append(audio_i16)
-                        if is_speech:
-                            state.speech_run += 1
-                        else:
-                            state.speech_run = 0
-                        if state.speech_run >= min_speech_frames:
-                            state.speaking = True
-                            state.utterance_frames = list(state.pre_buffer)
-                            state.pre_buffer.clear()
-                            state.silence_buffer = []
+                    state.utterance_frames.append(audio_i16)
+                    if is_speech:
+                        state.silence_run = 0
+                        state.saw_speech = True
                     else:
-                        if is_speech:
-                            if state.silence_buffer:
-                                state.utterance_frames.extend(state.silence_buffer)
-                                state.silence_buffer = []
-                            state.utterance_frames.append(audio_i16)
-                        else:
-                            state.silence_buffer.append(audio_i16)
-                            if len(state.silence_buffer) >= min_silence_frames:
-                                finish_active_utterance(state)
+                        state.silence_run += 1
 
-                        if state.speaking and should_force_flush_utterance(state.utterance_frames, max_utterance_samples):
-                            finish_active_utterance(state)
+                    if state.saw_speech and state.silence_run >= min_silence_frames:
+                        finish_active_utterance(state)
 
                     elapsed = time.time() - state.start_t
                     if elapsed - state.last_print >= 1.0:
